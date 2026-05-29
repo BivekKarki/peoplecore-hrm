@@ -214,7 +214,7 @@ export default function RegistrationPage() {
               <Camera size={16} className="text-blue-400 flex-shrink-0 mt-0.5" />
               <div className="text-xs text-slate-400 leading-relaxed">
                 <span className="text-blue-400 font-medium">Face enrollment follows.</span>{' '}
-                After saving, you will capture the employee's face from 3 angles (front, left, right) so they can use the kiosk to clock in automatically.
+                After saving, you will capture the employee&#39;s face from 3 angles (front, left, right) so they can use the kiosk to clock in automatically.
               </div>
             </div>
 

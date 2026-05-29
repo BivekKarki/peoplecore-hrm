@@ -32,7 +32,7 @@ export default function FaceEnrollment({ employeeId, employeeName, onComplete, o
   const canvasRef   = useRef<HTMLCanvasElement>(null);
   const streamRef   = useRef<MediaStream | null>(null);
 
-  const [faceApi, setFaceApi]         = useState<typeof import('face-api.js') | null>(null);
+  const [faceApi, setFaceApi]         = useState<typeof import('@vladmandic/face-api') | null>(null);
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [cameraOn, setCameraOn]       = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
@@ -48,7 +48,7 @@ export default function FaceEnrollment({ employeeId, employeeName, onComplete, o
   useEffect(() => {
     const load = async () => {
       try {
-        const api = await import('face-api.js');
+        const api = await import('@vladmandic/face-api');
         await Promise.all([
           api.nets.tinyFaceDetector.loadFromUri('/models'),
           api.nets.faceLandmark68Net.loadFromUri('/models'),
@@ -74,7 +74,7 @@ export default function FaceEnrollment({ employeeId, employeeName, onComplete, o
       try {
         const detection = await faceApi.detectSingleFace(
           videoRef.current,
-          new faceApi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 })
+          new faceApi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.3 })
         );
         setFaceDetected(!!detection);
       } catch { /* ignore */ }
@@ -86,12 +86,21 @@ export default function FaceEnrollment({ employeeId, employeeName, onComplete, o
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 640, height: 480, facingMode: 'user' },
+        video: {
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          facingMode: 'user',
+        },
         audio: false,
       });
+
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        // Wait for metadata to load before playing
+        await new Promise<void>(resolve => {
+          videoRef.current!.onloadedmetadata = () => resolve();
+        });
         await videoRef.current.play();
       }
       setCameraOn(true);
@@ -100,6 +109,34 @@ export default function FaceEnrollment({ employeeId, employeeName, onComplete, o
       console.error(err);
     }
   };
+
+  useEffect(() => {
+    if (!cameraOn || !streamRef.current || !videoRef.current) return;
+
+    const video = videoRef.current;
+    video.srcObject = streamRef.current;
+    video.muted = true;
+    video.playsInline = true;
+
+    const playVideo = async () => {
+      try {
+        await video.play();
+        console.log('Camera playing:', video.videoWidth, video.videoHeight);
+      } catch (err) {
+        console.error('Video play failed:', err);
+      }
+    };
+
+    if (video.readyState >= 2) {
+      playVideo();
+    } else {
+      video.onloadedmetadata = playVideo;
+    }
+
+    return () => {
+      video.onloadedmetadata = null;
+    };
+  }, [cameraOn]);
 
   const stopCamera = () => {
     streamRef.current?.getTracks().forEach(t => t.stop());
@@ -261,7 +298,15 @@ export default function FaceEnrollment({ employeeId, employeeName, onComplete, o
         </div>
       ) : (
         <div className="relative rounded-xl overflow-hidden bg-black border-2 border-[#2a3a52]" style={{ aspectRatio:'4/3' }}>
-          <video ref={videoRef} className="w-full h-full object-cover" muted playsInline style={{ transform:'scaleX(-1)' }} />
+          {/*<video ref={videoRef} className="w-full h-full object-cover" muted playsInline style={{ transform:'scaleX(-1)' }} />*/}
+          <video
+              ref={videoRef}
+              autoPlay
+              muted
+              playsInline
+              className="w-full h-full object-cover"
+              style={{ transform: 'scaleX(-1)' }}
+          />
           <canvas ref={canvasRef} className="hidden" />
 
           {/* Face detection indicator */}

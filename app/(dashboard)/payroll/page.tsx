@@ -283,14 +283,15 @@ export default function PayrollPage() {
               </div>
             </div>
 
-            {abaPreview.missing_bank.length > 0 && (
+            {(abaPreview.missing_bank?.length ?? 0) > 0 && (
               <div className="flex items-start gap-2 p-3 bg-amber-900/20 border border-amber-700/30 rounded-xl">
                 <AlertCircle size={15} className="text-amber-400 flex-shrink-0 mt-0.5" />
                 <div>
                   <div className="text-xs font-semibold text-amber-300 mb-1">
                     {abaPreview.missing_bank.length} employee{abaPreview.missing_bank.length > 1 ? 's' : ''} missing bank details:
                   </div>
-                  <div className="text-xs text-amber-400/70">{abaPreview.missing_bank.join(', ')}</div>
+                  {/*<div className="text-xs text-amber-400/70">{abaPreview.missing_bank.join(', ')}</div>*/}
+                  <div className="text-xs text-amber-400/70">{(abaPreview.missing_bank ?? []).join(', ')}</div>
                 </div>
               </div>
             )}

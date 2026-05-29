@@ -6,7 +6,6 @@
   --breakpoint-lg: 1024px;
   --breakpoint-xl: 1280px;
   --breakpoint-2xl: 1536px;
-  --color-*: initial;
   --font-sans: 'DM Sans', system-ui, sans-serif;
   --font-mono: 'DM Mono', 'Fira Code', monospace;
 }

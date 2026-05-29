@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Camera, CheckCircle, Clock, LogIn, LogOut, Wifi, WifiOff, Eye } from 'lucide-react';
+import { Camera, CheckCircle, Clock, LogIn, LogOut, Wifi, WifiOff, Eye, AlertTriangle } from 'lucide-react';
 
 type KioskState = 'idle' | 'liveness' | 'scanning' | 'matched' | 'no_match' | 'checked_in' | 'checked_out' | 'error';
 
@@ -15,19 +15,10 @@ interface Session {
   status: string; duration_mins: number | null;
 }
 
-interface LivenessState {
-  blinkDetected: boolean;
-  progress: number;
-  confidence: number;
-  message: string;
-  frameCount: number;
-  earHistory: number[];
-}
-
-const LIVENESS_MIN_FRAMES = 40;
-const EAR_BLINK_THRESHOLD = 0.22;
 const LEFT_EYE  = [36, 37, 38, 39, 40, 41];
 const RIGHT_EYE = [42, 43, 44, 45, 46, 47];
+const LIVENESS_FRAMES = 40;
+const EAR_THRESHOLD   = 0.22;
 
 function calcEAR(pts: { x: number; y: number }[]): number {
   const v1 = Math.hypot(pts[1].x - pts[5].x, pts[1].y - pts[5].y);
@@ -37,56 +28,61 @@ function calcEAR(pts: { x: number; y: number }[]): number {
 }
 
 export default function KioskPage() {
-  const videoRef         = useRef<HTMLVideoElement>(null);
-  const canvasRef        = useRef<HTMLCanvasElement>(null);
-  const streamRef        = useRef<MediaStream | null>(null);
-  const faceApiRef       = useRef<typeof import('face-api.js') | null>(null);
-  const detectionRef     = useRef<ReturnType<typeof setInterval> | null>(null);
-  const livenessRef      = useRef<ReturnType<typeof setInterval> | null>(null);
-  const resetTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const blinkCountRef    = useRef(0);
-  const frameCountRef    = useRef(0);
-  const prevEarRef       = useRef(1);
+  const videoRef        = useRef<HTMLVideoElement>(null);
+  const canvasRef       = useRef<HTMLCanvasElement>(null);
+  const faceApiRef      = useRef<typeof import('@vladmandic/face-api') | null>(null);
+  const detectionRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const livenessRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+  const resetTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const blinkCountRef   = useRef(0);
+  const frameCountRef   = useRef(0);
+  const prevEarRef      = useRef(1);
 
-  const [state, setState]         = useState<KioskState>('idle');
-  const [modelsLoaded, setLoaded] = useState(false);
-  const [faceVisible, setFaceVis] = useState(false);
-  const [employee, setEmployee]   = useState<MatchedEmployee | null>(null);
-  const [session, setSession]     = useState<Session | null>(null);
-  const [confidence, setConf]     = useState(0);
-  const [scanning, setScanning]   = useState(false);
-  const [time, setTime]           = useState('');
-  const [date, setDate]           = useState('');
-  const [online, setOnline]       = useState(true);
-  const [actionMsg, setActionMsg] = useState('');
-  const [liveness, setLiveness]   = useState<LivenessState>({
-    blinkDetected: false, progress: 0, confidence: 0,
-    message: 'Look at camera and blink naturally', frameCount: 0, earHistory: [],
-  });
+  const [state, setState]           = useState<KioskState>('idle');
+  const [modelsLoaded, setLoaded]   = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
+  const [faceVisible, setFaceVis]   = useState(false);
+  const [employee, setEmployee]     = useState<MatchedEmployee | null>(null);
+  const [session, setSession]       = useState<Session | null>(null);
+  const [confidence, setConf]       = useState(0);
+  const [scanning, setScanning]     = useState(false);
+  const [time, setTime]             = useState('');
+  const [date, setDate]             = useState('');
+  const [online, setOnline]         = useState(true);
+  const [actionMsg, setActionMsg]   = useState('');
+  const [blinkCount, setBlinkCount] = useState(0);
+  const [livenessProgress, setLivenessProgress] = useState(0);
 
   // Clock
   useEffect(() => {
     const tick = () => {
-      const now = new Date();
-      setTime(now.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-      setDate(now.toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }));
+      const n = new Date();
+      setTime(n.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      setDate(n.toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }));
     };
     tick();
     const t = setInterval(tick, 1000);
     return () => clearInterval(t);
   }, []);
 
-  // Online status
+  // Online
   useEffect(() => {
     window.addEventListener('online',  () => setOnline(true));
     window.addEventListener('offline', () => setOnline(false));
   }, []);
 
-  // Load face-api.js models + start camera
+  // Load models + camera
   useEffect(() => {
     const init = async () => {
       try {
-        const api = await import('face-api.js');
+        const api = await import('@vladmandic/face-api');
+
+        // Validate model files exist and have content
+        const res = await fetch('/models/tiny_face_detector_model-weights_manifest.json');
+        if (!res.ok) throw new Error('Model files missing. Run: node scripts/download-models.js');
+        const manifest = await res.json();
+        if (!manifest || !Array.isArray(manifest)) throw new Error('Model files are empty. Run: node scripts/download-models.js');
+
         await Promise.all([
           api.nets.tinyFaceDetector.loadFromUri('/models'),
           api.nets.faceLandmark68Net.loadFromUri('/models'),
@@ -96,23 +92,25 @@ export default function KioskPage() {
         setLoaded(true);
         await startCamera();
       } catch (err) {
-        console.error('Model/camera init failed', err);
+        const msg = err instanceof Error ? err.message : 'Failed to load models';
+        console.error('[Kiosk init]', msg);
+        setModelError(msg);
         setState('error');
       }
     };
     init();
-    return () => { stopAll(); };
+    return () => stopAll();
   }, []);
 
-  // Idle face detection loop
+  // Face detection loop while idle
   useEffect(() => {
     if (!modelsLoaded || state !== 'idle') return;
     detectionRef.current = setInterval(async () => {
       if (!videoRef.current || !faceApiRef.current) return;
       try {
         const det = await faceApiRef.current.detectSingleFace(
-          videoRef.current,
-          new faceApiRef.current.TinyFaceDetectorOptions({ inputSize: 160, scoreThreshold: 0.5 })
+            videoRef.current,
+            new faceApiRef.current.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.3 })
         );
         setFaceVis(!!det);
       } catch { /* ignore */ }
@@ -121,24 +119,45 @@ export default function KioskPage() {
   }, [modelsLoaded, state]);
 
   const startCamera = async () => {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: 1280, height: 720, facingMode: 'user' },
-      audio: false,
-    });
-    streamRef.current = stream;
-    if (videoRef.current) {
-      videoRef.current.srcObject = stream;
-      await videoRef.current.play();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          facingMode: 'user',
+        },
+        audio: false,
+      });
+
+      const video = videoRef.current;
+      if (!video) return;
+
+      video.srcObject = stream;
+
+      video.onloadedmetadata = async () => {
+        try {
+          await video.play();
+          console.log('Camera started:', video.videoWidth, video.videoHeight);
+        } catch (err) {
+          console.error('Video play failed:', err);
+        }
+      };
+    } catch (err) {
+      console.error('Camera error:', err);
+      setModelError('Camera permission denied or camera not available');
+      setState('error');
     }
   };
 
   const stopAll = () => {
-    streamRef.current?.getTracks().forEach(t => t.stop());
+    if (videoRef.current?.srcObject) {
+      (videoRef.current.srcObject as MediaStream).getTracks().forEach(t => t.stop());
+    }
     [detectionRef, livenessRef].forEach(r => { if (r.current) clearInterval(r.current); });
     if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
   };
 
-  const resetToIdle = useCallback((delay = 7000) => {
+  const resetToIdle = useCallback((delay = 8000) => {
     if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
     resetTimerRef.current = setTimeout(() => {
       setState('idle');
@@ -146,106 +165,85 @@ export default function KioskPage() {
       setSession(null);
       setConf(0);
       setActionMsg('');
-      blinkCountRef.current = 0;
-      frameCountRef.current = 0;
-      prevEarRef.current = 1;
-      setLiveness({ blinkDetected: false, progress: 0, confidence: 0, message: 'Look at camera and blink naturally', frameCount: 0, earHistory: [] });
+      blinkCountRef.current  = 0;
+      frameCountRef.current  = 0;
+      prevEarRef.current     = 1;
+      setBlinkCount(0);
+      setLivenessProgress(0);
     }, delay);
   }, []);
 
-  // Start liveness check
+  // Start liveness check → then face scan
   const startLiveness = () => {
     if (!faceApiRef.current || state !== 'idle') return;
     blinkCountRef.current = 0;
     frameCountRef.current = 0;
-    prevEarRef.current = 1;
+    prevEarRef.current    = 1;
+    setBlinkCount(0);
+    setLivenessProgress(0);
     setState('liveness');
 
     livenessRef.current = setInterval(async () => {
       if (!videoRef.current || !faceApiRef.current) return;
       try {
         const det = await faceApiRef.current
-          .detectSingleFace(videoRef.current, new faceApiRef.current.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 }))
-          .withFaceLandmarks();
+            .detectSingleFace(videoRef.current, new faceApiRef.current.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 }))
+            .withFaceLandmarks();
 
-        if (!det) {
-          setLiveness(p => ({ ...p, message: '⚠ No face detected — position yourself in frame' }));
-          return;
-        }
+        if (!det) return;
 
         frameCountRef.current++;
         const pts = det.landmarks.positions;
 
-        // Compute EAR for both eyes
-        const leftPts  = LEFT_EYE.map(i  => pts[i]);
-        const rightPts = RIGHT_EYE.map(i => pts[i]);
-        const ear      = (calcEAR(leftPts) + calcEAR(rightPts)) / 2;
+        const leftEAR  = calcEAR(LEFT_EYE.map(i => pts[i]));
+        const rightEAR = calcEAR(RIGHT_EYE.map(i => pts[i]));
+        const ear      = (leftEAR + rightEAR) / 2;
 
-        // Detect blink: EAR drops below threshold from above
-        const prevEar = prevEarRef.current;
-        if (prevEar > EAR_BLINK_THRESHOLD && ear <= EAR_BLINK_THRESHOLD) {
+        if (prevEarRef.current > EAR_THRESHOLD && ear <= EAR_THRESHOLD) {
           blinkCountRef.current++;
+          setBlinkCount(blinkCountRef.current);
         }
         prevEarRef.current = ear;
 
-        const fc          = frameCountRef.current;
-        const blinkDetected = blinkCountRef.current >= 1;
-        const progress    = Math.min(100, Math.round((fc / LIVENESS_MIN_FRAMES) * 100));
+        const progress = Math.min(100, Math.round((frameCountRef.current / LIVENESS_FRAMES) * 100));
+        setLivenessProgress(progress);
 
-        let confidence = 0;
-        if (blinkDetected) confidence += 60;
-        if (fc >= 20)      confidence += 20;
-        if (fc >= LIVENESS_MIN_FRAMES) confidence += 20;
-
-        const message = !blinkDetected
-          ? `👁 Blink naturally (${blinkCountRef.current}/1 blinks detected)`
-          : fc < LIVENESS_MIN_FRAMES
-          ? `✓ Blink detected — hold still (${progress}%)`
-          : '✓ Liveness verified — scanning face…';
-
-        setLiveness({ blinkDetected, progress, confidence, message, frameCount: fc, earHistory: [] });
-
-        // All checks passed — proceed to face recognition
-        if (blinkDetected && fc >= LIVENESS_MIN_FRAMES) {
+        if (blinkCountRef.current >= 1 && frameCountRef.current >= LIVENESS_FRAMES) {
           if (livenessRef.current) clearInterval(livenessRef.current);
           await performFaceScan();
         }
-      } catch (err) {
-        console.error('[Liveness]', err);
-      }
-    }, 150); // 150ms = ~6fps for liveness
+      } catch (err) { console.error('[Liveness]', err); }
+    }, 150);
   };
 
   const performFaceScan = async () => {
     if (!faceApiRef.current || !videoRef.current || !canvasRef.current || scanning) return;
     setScanning(true);
     setState('scanning');
-
     try {
       const api    = faceApiRef.current;
       const video  = videoRef.current;
       const canvas = canvasRef.current;
-
       canvas.width  = video.videoWidth;
       canvas.height = video.videoHeight;
       canvas.getContext('2d')!.drawImage(video, 0, 0);
 
       const detection = await api
-        .detectSingleFace(video, new api.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.6 }))
-        .withFaceLandmarks()
-        .withFaceDescriptor();
+          .detectSingleFace(video, new api.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.6 }))
+          .withFaceLandmarks()
+          .withFaceDescriptor();
 
       if (!detection) {
         setState('no_match');
-        resetToIdle(4000);
+        resetToIdle(5000);
         return;
       }
 
-      const descriptorJson = JSON.stringify(Array.from(detection.descriptor));
+      const descriptor = JSON.stringify(Array.from(detection.descriptor));
       const r = await fetch('/api/face-match', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ descriptor: descriptorJson }),
+        body: JSON.stringify({ descriptor }),
       });
       const j = await r.json();
 
@@ -278,18 +276,21 @@ export default function KioskPage() {
       });
       const j = await r.json();
       if (j.already_checked_in) {
-        setActionMsg('Already checked in today!');
+        setActionMsg('You have already checked in today!');
         setState('checked_in');
         setSession(j.session);
       } else if (r.ok) {
         setState('checked_in');
         setSession(j.session);
-        setActionMsg('Work session started. Have a great day!');
+        setActionMsg('Work session started. Have a great day! 🎉');
       } else {
         setActionMsg(j.error ?? 'Check-in failed');
       }
-      resetToIdle(9000);
-    } catch { setActionMsg('Network error. Please try again.'); resetToIdle(4000); }
+      resetToIdle(10000);
+    } catch {
+      setActionMsg('Network error. Please try again.');
+      resetToIdle(4000);
+    }
   };
 
   const checkOut = async () => {
@@ -303,377 +304,407 @@ export default function KioskPage() {
       const j = await r.json();
       if (r.ok) {
         setState('checked_out');
-        setActionMsg(`Great work today! You worked ${j.duration}.`);
+        setActionMsg(`Great work! You worked ${j.duration}.`);
         setSession(j.session);
       } else {
         setActionMsg(j.error ?? 'Check-out failed');
       }
-      resetToIdle(9000);
-    } catch { setActionMsg('Network error.'); resetToIdle(4000); }
+      resetToIdle(10000);
+    } catch {
+      setActionMsg('Network error.');
+      resetToIdle(4000);
+    }
   };
 
   const isCheckedIn = session?.status === 'active';
   const initials    = employee ? `${employee.first_name[0]}${employee.last_name[0]}`.toUpperCase() : '';
   const fmtT        = (iso: string) => new Date(iso).toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
 
-  // Liveness progress bar color
-  const livenessColor = liveness.blinkDetected
-    ? liveness.progress >= 100 ? 'bg-green-500' : 'bg-blue-500'
-    : 'bg-amber-500';
+  const borderColor = state === 'liveness'
+      ? (blinkCount >= 1 ? '#16a34a' : '#d97706')
+      : state === 'scanning' ? '#2563eb'
+          : (state === 'matched' || state === 'checked_in' || state === 'checked_out') ? '#16a34a'
+              : state === 'no_match' ? '#dc2626'
+                  : faceVisible ? '#16a34a' : '#2a3a52';
 
   return (
-    <div className="min-h-screen bg-[#0a0f1a] flex flex-col select-none" style={{ fontFamily: 'DM Sans, system-ui, sans-serif' }}>
+      <div style={{ minHeight: '100vh', backgroundColor: '#0a0f1a', display: 'flex', flexDirection: 'column', fontFamily: "'DM Sans', system-ui, sans-serif", userSelect: 'none' }}>
 
-      {/* Topbar */}
-      <div className="flex items-center justify-between px-6 py-3 bg-[#0f1724] border-b border-[#1e2d42]">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold text-sm">P</div>
-          <div>
-            <div className="text-sm font-semibold text-slate-100">PeopleCore</div>
-            <div className="text-[10px] text-slate-500 font-mono uppercase tracking-widest">Attendance Kiosk</div>
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 24px', backgroundColor: '#0f1724', borderBottom: '1px solid #1e2d42' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ width: 32, height: 32, backgroundColor: '#2563eb', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: 16 }}>P</div>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: '#f1f5f9' }}>PeopleCore</div>
+              <div style={{ fontSize: 9, color: '#475569', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Attendance Kiosk</div>
+            </div>
+          </div>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 22, fontWeight: 700, color: '#f1f5f9', fontFamily: 'monospace', letterSpacing: '0.05em' }}>{time}</div>
+            <div style={{ fontSize: 11, color: '#64748b' }}>{date}</div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontFamily: 'monospace' }}>
+            {online
+                ? <><Wifi size={13} style={{ color: '#4ade80' }} /><span style={{ color: '#4ade80' }}>Online</span></>
+                : <><WifiOff size={13} style={{ color: '#f87171' }} /><span style={{ color: '#f87171' }}>Offline</span></>
+            }
           </div>
         </div>
-        <div className="text-center">
-          <div className="text-2xl font-mono font-semibold text-slate-100 tracking-wider">{time}</div>
-          <div className="text-xs text-slate-500">{date}</div>
-        </div>
-        <div className="flex items-center gap-2 text-xs font-mono">
-          {online
-            ? <><Wifi size={13} className="text-green-400" /><span className="text-green-400">Online</span></>
-            : <><WifiOff size={13} className="text-red-400" /><span className="text-red-400">Offline</span></>
-          }
-        </div>
-      </div>
 
-      {/* Main */}
-      <div className="flex-1 flex items-center justify-center p-6 gap-8">
+        {/* Body */}
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, gap: 32 }}>
 
-        {/* Camera panel */}
-        <div className="flex flex-col items-center gap-4" style={{ flex: '0 0 480px' }}>
-          <div className="relative w-full rounded-2xl overflow-hidden bg-black border-2 border-[#1e2d42]" style={{ aspectRatio: '4/3' }}>
-            <video ref={videoRef} className="w-full h-full object-cover" muted playsInline style={{ transform: 'scaleX(-1)' }} />
-            <canvas ref={canvasRef} className="hidden" />
+          {/* Camera panel */}
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, width: 480, flexShrink: 0 }}>
+            <div style={{
+              position: 'relative', width: '100%', borderRadius: 16,
+              overflow: 'hidden', backgroundColor: '#000',
+              border: `2px solid ${borderColor}`, aspectRatio: '4/3',
+              transition: 'border-color .3s',
+            }}>
+              {/*<video ref={videoRef} style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} muted playsInline />*/}
+              <video
+                  ref={videoRef}
+                  autoPlay
+                  muted
+                  playsInline
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'cover',
+                    transform: 'scaleX(-1)',
+                  }}
+              />
+              <canvas ref={canvasRef} style={{ display: 'none' }} />
 
-            {/* Corner brackets */}
-            {(state === 'idle' || state === 'liveness') && (
-              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="relative" style={{ width: 200, height: 200 }}>
-                  {[
-                    { pos: 'top-0 left-0',     border: 'border-t-2 border-l-2 rounded-tl-xl' },
-                    { pos: 'top-0 right-0',    border: 'border-t-2 border-r-2 rounded-tr-xl' },
-                    { pos: 'bottom-0 left-0',  border: 'border-b-2 border-l-2 rounded-bl-xl' },
-                    { pos: 'bottom-0 right-0', border: 'border-b-2 border-r-2 rounded-br-xl' },
-                  ].map(({ pos, border }, i) => (
-                    <div key={i} className={`absolute w-10 h-10 ${pos} ${border} transition-colors duration-300 ${
-                      state === 'liveness' && liveness.blinkDetected ? 'border-green-400' :
-                      state === 'liveness' ? 'border-amber-400' :
-                      faceVisible ? 'border-green-400' : 'border-blue-500'
-                    }`} />
-                  ))}
-                </div>
-              </div>
-            )}
+              {/* Corner brackets */}
+              {(state === 'idle' || state === 'liveness') && (
+                  <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
+                    <div style={{ position: 'relative', width: 180, height: 180 }}>
+                      {[
+                        { top: 0, left: 0,    borderTop: `2px solid ${borderColor}`, borderLeft: `2px solid ${borderColor}`, borderRadius: '8px 0 0 0' },
+                        { top: 0, right: 0,   borderTop: `2px solid ${borderColor}`, borderRight: `2px solid ${borderColor}`, borderRadius: '0 8px 0 0' },
+                        { bottom: 0, left: 0, borderBottom: `2px solid ${borderColor}`, borderLeft: `2px solid ${borderColor}`, borderRadius: '0 0 0 8px' },
+                        { bottom: 0, right: 0,borderBottom: `2px solid ${borderColor}`, borderRight: `2px solid ${borderColor}`, borderRadius: '0 0 8px 0' },
+                      ].map((s, i) => (
+                          <div key={i} style={{ position: 'absolute', width: 32, height: 32, ...s, transition: 'border-color .3s' }} />
+                      ))}
+                    </div>
+                  </div>
+              )}
 
-            {/* Liveness progress overlay */}
-            {state === 'liveness' && (
-              <div className="absolute inset-x-0 bottom-0">
-                <div className="bg-black/60 px-4 py-3">
-                  <div className="flex items-center justify-between text-xs text-slate-300 mb-1.5">
-                    <span className="flex items-center gap-1.5">
-                      <Eye size={12} className={liveness.blinkDetected ? 'text-green-400' : 'text-amber-400'} />
-                      Anti-Spoofing Check
+              {/* Scan animation line */}
+              {state === 'scanning' && (
+                  <div style={{ position: 'absolute', left: 0, right: 0, height: 2, background: 'linear-gradient(90deg,transparent,#2563eb,transparent)', animation: 'scanMove 1.5s linear infinite' }} />
+              )}
+
+              {/* Success overlay */}
+              {(state === 'matched' || state === 'checked_in' || state === 'checked_out') && (
+                  <div style={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(22,163,74,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <CheckCircle size={64} style={{ color: '#4ade80' }} />
+                  </div>
+              )}
+
+              {/* No match overlay */}
+              {state === 'no_match' && (
+                  <div style={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(220,38,38,0.15)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 40 }}>😕</span>
+                    <span style={{ color: '#fca5a5', fontSize: 13, fontFamily: 'monospace' }}>Not recognized</span>
+                  </div>
+              )}
+
+              {/* Face detected badge */}
+              {state === 'idle' && (
+                  <div style={{
+                    position: 'absolute', top: 10, left: 10, display: 'flex', alignItems: 'center', gap: 6,
+                    padding: '4px 10px', borderRadius: 8, fontSize: 11, fontFamily: 'monospace',
+                    backdropFilter: 'blur(4px)',
+                    backgroundColor: faceVisible ? 'rgba(20,83,45,0.8)' : 'rgba(15,23,36,0.8)',
+                    border: `1px solid ${faceVisible ? '#166534' : '#334155'}`,
+                    color: faceVisible ? '#86efac' : '#94a3b8',
+                  }}>
+                    <div style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: faceVisible ? '#4ade80' : '#64748b', animation: faceVisible ? 'pulse 2s infinite' : 'none' }} />
+                    {faceVisible ? 'Face detected — ready' : 'Position face in frame'}
+                  </div>
+              )}
+
+              {/* Liveness progress bar */}
+              {state === 'liveness' && (
+                  <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0 }}>
+                    <div style={{ backgroundColor: 'rgba(0,0,0,0.7)', padding: '10px 14px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#94a3b8', marginBottom: 6 }}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <Eye size={11} />
+                      Anti-spoofing check
                     </span>
-                    <span className="font-mono">{liveness.progress}%</span>
+                        <span style={{ fontFamily: 'monospace' }}>{livenessProgress}%</span>
+                      </div>
+                      <div style={{ height: 4, backgroundColor: '#1e293b', borderRadius: 2 }}>
+                        <div style={{
+                          height: 4, borderRadius: 2, transition: 'width .15s',
+                          backgroundColor: blinkCount >= 1 ? '#16a34a' : '#d97706',
+                          width: `${livenessProgress}%`,
+                        }} />
+                      </div>
+                      <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 6, textAlign: 'center' }}>
+                        {blinkCount < 1
+                            ? `👁 Please blink naturally (${blinkCount}/1 detected)`
+                            : livenessProgress < 100
+                                ? '✓ Blink detected — verifying…'
+                                : '✓ Liveness confirmed — scanning face…'
+                        }
+                      </div>
+                    </div>
                   </div>
-                  <div className="h-1.5 bg-[#1e2d42] rounded-full overflow-hidden">
-                    <div className={`h-full rounded-full transition-all duration-300 ${livenessColor}`}
-                         style={{ width: `${liveness.progress}%` }} />
+              )}
+
+              {/* Confidence badge */}
+              {state === 'matched' && confidence > 0 && (
+                  <div style={{ position: 'absolute', top: 10, right: 10, backgroundColor: 'rgba(20,83,45,0.9)', border: '1px solid #166534', padding: '3px 8px', borderRadius: 6, fontSize: 11, fontFamily: 'monospace', color: '#86efac' }}>
+                    {confidence}% match
                   </div>
-                  <div className="text-[11px] text-slate-400 mt-1.5 text-center">{liveness.message}</div>
+              )}
+            </div>
+
+            {/* Models loading */}
+            {!modelsLoaded && state !== 'error' && (
+                <div style={{ fontSize: 12, color: '#60a5fa', fontFamily: 'monospace', animation: 'pulse 2s infinite' }}>
+                  Loading face recognition models…
                 </div>
-              </div>
             )}
 
-            {/* Scanning overlay */}
+            {/* Action button */}
+            {state === 'idle' && modelsLoaded && (
+                <button onClick={startLiveness}
+                        style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: '#2563eb', color: '#fff', border: 'none', borderRadius: 12, padding: '16px 24px', fontSize: 16, fontWeight: 600, cursor: 'pointer', transition: 'background .15s' }}
+                        onMouseEnter={e => (e.currentTarget as HTMLElement).style.backgroundColor = '#1d4ed8'}
+                        onMouseLeave={e => (e.currentTarget as HTMLElement).style.backgroundColor = '#2563eb'}
+                >
+                  <Eye size={20} />
+                  {faceVisible ? 'Start Verification' : 'Show Face & Verify'}
+                </button>
+            )}
+
+            {state === 'liveness' && (
+                <button onClick={() => { if (livenessRef.current) clearInterval(livenessRef.current); setState('idle'); }}
+                        style={{ width: '100%', padding: '12px 24px', borderRadius: 12, backgroundColor: 'transparent', border: '1px solid #2a3a52', color: '#94a3b8', fontSize: 13, cursor: 'pointer' }}>
+                  Cancel
+                </button>
+            )}
+
+            {state === 'error' && (
+                <div style={{ width: '100%', padding: 16, backgroundColor: '#7f1d1d22', border: '1px solid #991b1b', borderRadius: 12, fontSize: 13, color: '#fca5a5', textAlign: 'center' }}>
+                  {modelError ?? 'Camera error — please refresh'}
+                  {modelError?.includes('download-models') && (
+                      <div style={{ marginTop: 8, fontSize: 11, fontFamily: 'monospace', color: '#f87171' }}>
+                        Run: node scripts/download-models.js
+                      </div>
+                  )}
+                </div>
+            )}
+          </div>
+
+          {/* Info panel */}
+          <div style={{ width: 360, display: 'flex', flexDirection: 'column', gap: 12, flexShrink: 0 }}>
+
+            {/* Idle */}
+            {state === 'idle' && (
+                <div style={{ textAlign: 'center', padding: '32px 0' }}>
+                  <div style={{ width: 80, height: 80, backgroundColor: '#1e2d42', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px' }}>
+                    <Camera size={36} style={{ color: '#475569' }} />
+                  </div>
+                  <div style={{ fontSize: 20, fontWeight: 600, color: '#94a3b8', marginBottom: 8 }}>Welcome</div>
+                  <div style={{ fontSize: 13, color: '#475569', lineHeight: 1.7, marginBottom: 24 }}>
+                    Look at the camera and press<br />
+                    <span style={{ color: '#60a5fa', fontWeight: 500 }}>Start Verification</span> to clock in or out
+                  </div>
+                  <div style={{ backgroundColor: '#1e2d42', border: '1px solid #2a3a52', borderRadius: 12, padding: 16, textAlign: 'left' }}>
+                    <div style={{ fontSize: 10, color: '#475569', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 10 }}>How it works</div>
+                    {[
+                      { n: '1', t: 'Stand in front of the kiosk' },
+                      { n: '2', t: 'Look directly at the camera' },
+                      { n: '3', t: 'Blink naturally when prompted' },
+                      { n: '4', t: 'Confirm to start or end your shift' },
+                    ].map(s => (
+                        <div key={s.n} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, fontSize: 12, color: '#94a3b8' }}>
+                          <div style={{ width: 20, height: 20, backgroundColor: '#1e3a8a33', color: '#60a5fa', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontFamily: 'monospace', fontWeight: 700, flexShrink: 0 }}>{s.n}</div>
+                          {s.t}
+                        </div>
+                    ))}
+                  </div>
+                </div>
+            )}
+
+            {/* Liveness */}
+            {state === 'liveness' && (
+                <div style={{ textAlign: 'center', padding: '32px 0' }}>
+                  <div style={{ width: 80, height: 80, backgroundColor: blinkCount >= 1 ? '#14532d22' : '#78350f22', border: `2px solid ${blinkCount >= 1 ? '#16a34a' : '#d97706'}`, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px', transition: 'all .3s' }}>
+                    <Eye size={36} style={{ color: blinkCount >= 1 ? '#4ade80' : '#fcd34d' }} />
+                  </div>
+                  <div style={{ fontSize: 18, fontWeight: 600, color: '#e2e8f0', marginBottom: 8 }}>Anti-Spoofing Check</div>
+                  <div style={{ fontSize: 13, color: '#64748b', marginBottom: 24 }}>
+                    {blinkCount < 1 ? 'Please blink naturally to verify you are real' : 'Blink verified — processing…'}
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10, textAlign: 'left' }}>
+                    {[
+                      { done: blinkCount >= 1, label: 'Natural blink detected' },
+                      { done: livenessProgress >= 50, label: 'Motion analysis complete' },
+                      { done: livenessProgress >= 100, label: 'Liveness confirmed' },
+                    ].map((s, i) => (
+                        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13 }}>
+                          <div style={{ width: 22, height: 22, borderRadius: '50%', backgroundColor: s.done ? '#16a34a' : '#1e2d42', border: `1px solid ${s.done ? '#16a34a' : '#2a3a52'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 700, color: s.done ? '#fff' : '#64748b', flexShrink: 0 }}>
+                            {s.done ? '✓' : i + 1}
+                          </div>
+                          <span style={{ color: s.done ? '#86efac' : '#64748b' }}>{s.label}</span>
+                        </div>
+                    ))}
+                  </div>
+                </div>
+            )}
+
+            {/* Scanning */}
             {state === 'scanning' && (
-              <div className="absolute inset-0 bg-blue-900/30 flex items-center justify-center">
-                <div className="absolute left-0 right-0 h-0.5 bg-gradient-to-r from-transparent via-blue-400 to-transparent"
-                     style={{ animation: 'scanMove 1.5s linear infinite', top: '50%' }} />
-                <div className="text-blue-300 text-sm font-mono animate-pulse mt-8">Identifying…</div>
-              </div>
-            )}
-
-            {/* Match overlay */}
-            {(state === 'matched' || state === 'checked_in' || state === 'checked_out') && (
-              <div className="absolute inset-0 bg-green-900/20 flex items-center justify-center">
-                <CheckCircle size={64} className="text-green-400" />
-              </div>
+                <div style={{ textAlign: 'center', padding: '48px 0' }}>
+                  <div style={{ width: 80, height: 80, backgroundColor: '#1e3a8a22', border: '2px solid #2563eb', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px', animation: 'pulse 1.5s infinite' }}>
+                    <Camera size={36} style={{ color: '#60a5fa' }} />
+                  </div>
+                  <div style={{ fontSize: 18, fontWeight: 600, color: '#93c5fd' }}>Identifying…</div>
+                  <div style={{ fontSize: 13, color: '#64748b', marginTop: 8 }}>Matching face against database</div>
+                </div>
             )}
 
             {/* No match */}
             {state === 'no_match' && (
-              <div className="absolute inset-0 bg-red-900/30 flex flex-col items-center justify-center gap-2">
-                <div className="text-4xl">😕</div>
-                <div className="text-red-300 text-sm font-mono">Not recognized</div>
-              </div>
+                <div style={{ textAlign: 'center', padding: '48px 0' }}>
+                  <div style={{ fontSize: 48, marginBottom: 16 }}>😕</div>
+                  <div style={{ fontSize: 18, fontWeight: 600, color: '#f87171', marginBottom: 8 }}>Not Recognized</div>
+                  <div style={{ fontSize: 13, color: '#64748b' }}>Face not found in system.<br />Ensure you are enrolled by HR.</div>
+                  <div style={{ marginTop: 16, fontSize: 12, color: '#334155' }}>Resetting in a moment…</div>
+                </div>
             )}
 
-            {/* Face detection badge */}
-            {state === 'idle' && (
-              <div className={`absolute top-3 left-3 flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono backdrop-blur-sm border ${
-                faceVisible
-                  ? 'bg-green-900/70 text-green-300 border-green-600/40'
-                  : 'bg-slate-900/70 text-slate-400 border-slate-600/40'
-              }`}>
-                <div className={`w-1.5 h-1.5 rounded-full ${faceVisible ? 'bg-green-400 animate-pulse' : 'bg-slate-500'}`} />
-                {faceVisible ? 'Face detected' : 'Position face in frame'}
-              </div>
-            )}
-
-            {/* Liveness badge */}
-            {state === 'liveness' && liveness.blinkDetected && (
-              <div className="absolute top-3 right-3 bg-green-900/80 border border-green-600/40 px-2.5 py-1 rounded-lg text-xs font-mono text-green-300 backdrop-blur-sm">
-                ✓ Blink verified
-              </div>
-            )}
-
-            {/* Confidence badge */}
-            {state === 'matched' && (
-              <div className="absolute top-3 right-3 bg-green-900/80 border border-green-600/40 px-2.5 py-1 rounded-lg text-xs font-mono text-green-300 backdrop-blur-sm">
-                {confidence}% match
-              </div>
-            )}
-          </div>
-
-          {/* Loading state */}
-          {!modelsLoaded && (
-            <div className="text-xs text-blue-400 font-mono animate-pulse text-center">
-              Loading face recognition models…
-            </div>
-          )}
-
-          {/* Main action button */}
-          {state === 'idle' && modelsLoaded && (
-            <button onClick={startLiveness} disabled={scanning}
-              className="w-full flex items-center justify-center gap-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 rounded-xl text-base transition-colors">
-              <Eye size={20} />
-              {faceVisible ? 'Start Verification' : 'Show Face & Verify'}
-            </button>
-          )}
-
-          {state === 'liveness' && (
-            <button onClick={() => { if (livenessRef.current) clearInterval(livenessRef.current); setState('idle'); }}
-              className="w-full py-3 rounded-xl bg-[#1e2d42] border border-[#2a3a52] text-slate-400 text-sm hover:text-slate-200 transition-colors">
-              Cancel
-            </button>
-          )}
-
-          {state === 'error' && (
-            <div className="w-full p-4 bg-red-900/20 border border-red-700/30 rounded-xl text-sm text-red-400 text-center">
-              Camera or model error — please refresh the page
-            </div>
-          )}
-        </div>
-
-        {/* Info panel */}
-        <div className="flex flex-col gap-4" style={{ flex: '0 0 360px' }}>
-
-          {/* Idle */}
-          {state === 'idle' && (
-            <div className="text-center py-8">
-              <div className="w-24 h-24 bg-[#1e2d42] rounded-full flex items-center justify-center mx-auto mb-5">
-                <Camera size={40} className="text-slate-600" />
-              </div>
-              <div className="text-xl font-semibold text-slate-300 mb-2">Welcome</div>
-              <div className="text-sm text-slate-500 leading-relaxed mb-6">
-                Look at the camera and press<br />
-                <span className="text-blue-400 font-medium">Start Verification</span> to clock in or out
-              </div>
-              <div className="p-3 bg-[#1e2d42] rounded-xl border border-[#2a3a52] text-left">
-                <div className="text-xs text-slate-500 font-mono mb-2 uppercase tracking-wider">Security Features</div>
-                <div className="space-y-2">
-                  {[
-                    { icon:'👁', label:'Liveness detection', desc:'Blink verification prevents photo spoofing' },
-                    { icon:'🔍', label:'128-dim face matching', desc:'AI matches your face descriptor' },
-                    { icon:'🔒', label:'Encrypted storage', desc:'Face data stored securely in database' },
-                  ].map(f => (
-                    <div key={f.label} className="flex items-start gap-2 text-xs">
-                      <span className="text-base">{f.icon}</span>
+            {/* Matched */}
+            {state === 'matched' && employee && (
+                <div>
+                  <div style={{ backgroundColor: '#162030', border: '1px solid #166534', borderRadius: 20, padding: 20, marginBottom: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 }}>
+                      <div style={{ width: 60, height: 60, borderRadius: '50%', backgroundColor: employee.avatar_color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20, fontWeight: 700, color: '#fff', flexShrink: 0 }}>
+                        {initials}
+                      </div>
                       <div>
-                        <div className="text-slate-300 font-medium">{f.label}</div>
-                        <div className="text-slate-600">{f.desc}</div>
+                        <div style={{ fontSize: 20, fontWeight: 600, color: '#f1f5f9' }}>{employee.first_name} {employee.last_name}</div>
+                        <div style={{ fontSize: 13, color: '#94a3b8', marginTop: 2 }}>{employee.job_title}</div>
+                        <div style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace', marginTop: 2 }}>{employee.department} · {employee.employee_id}</div>
                       </div>
                     </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
 
-          {/* Liveness check */}
-          {state === 'liveness' && (
-            <div className="text-center py-8">
-              <div className={`w-24 h-24 border-2 rounded-full flex items-center justify-center mx-auto mb-5 transition-colors ${
-                liveness.blinkDetected ? 'bg-green-900/30 border-green-500' : 'bg-amber-900/30 border-amber-500'
-              }`}>
-                <Eye size={40} className={liveness.blinkDetected ? 'text-green-400' : 'text-amber-400'} />
-              </div>
-              <div className="text-lg font-semibold text-slate-200 mb-2">Anti-Spoofing Check</div>
-              <div className="text-sm text-slate-400 mb-4">{liveness.message}</div>
-              <div className="space-y-3 text-left">
-                {[
-                  { done: liveness.blinkDetected, label: 'Natural blink detected' },
-                  { done: liveness.progress >= 50, label: 'Motion analysis complete' },
-                  { done: liveness.progress >= 100, label: 'Liveness confirmed' },
-                ].map((step, i) => (
-                  <div key={i} className="flex items-center gap-2.5 text-sm">
-                    <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] font-bold ${
-                      step.done ? 'bg-green-600 text-white' : 'bg-[#2a3a52] text-slate-500'
-                    }`}>{step.done ? '✓' : i + 1}</div>
-                    <span className={step.done ? 'text-green-300' : 'text-slate-500'}>{step.label}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Scanning */}
-          {state === 'scanning' && (
-            <div className="text-center py-12">
-              <div className="w-24 h-24 bg-blue-900/30 border-2 border-blue-500 rounded-full flex items-center justify-center mx-auto mb-5 animate-pulse">
-                <Camera size={36} className="text-blue-400" />
-              </div>
-              <div className="text-lg font-semibold text-blue-300">Identifying…</div>
-              <div className="text-sm text-slate-500 mt-2">Matching face against database</div>
-            </div>
-          )}
-
-          {/* No match */}
-          {state === 'no_match' && (
-            <div className="text-center py-12">
-              <div className="text-5xl mb-4">😕</div>
-              <div className="text-lg font-semibold text-red-400 mb-2">Not Recognized</div>
-              <div className="text-sm text-slate-500">Face not found in system.<br />Ensure you are enrolled by HR.</div>
-              <div className="mt-4 text-xs text-slate-600">Resetting in a moment…</div>
-            </div>
-          )}
-
-          {/* Matched */}
-          {state === 'matched' && employee && (
-            <div>
-              <div className="p-5 bg-[#162030] border border-green-700/30 rounded-2xl mb-3">
-                <div className="flex items-center gap-4 mb-4">
-                  <div className="w-16 h-16 rounded-full flex items-center justify-center text-xl font-bold text-white flex-shrink-0"
-                       style={{ backgroundColor: employee.avatar_color }}>
-                    {initials}
-                  </div>
-                  <div>
-                    <div className="text-xl font-semibold text-slate-100">{employee.first_name} {employee.last_name}</div>
-                    <div className="text-sm text-slate-400">{employee.job_title}</div>
-                    <div className="text-xs text-slate-500 font-mono mt-0.5">{employee.department} · {employee.employee_id}</div>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2 mb-4">
-                  <div className="bg-[#1e2d42] rounded-xl p-3 text-center">
-                    <div className="text-xs text-slate-500 font-mono mb-1">TODAY</div>
-                    <div className="text-sm font-semibold text-slate-200">
-                      {new Date().toLocaleDateString('en-AU', { day:'numeric', month:'short' })}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 16 }}>
+                      <div style={{ backgroundColor: '#1e2d42', borderRadius: 10, padding: 10, textAlign: 'center' }}>
+                        <div style={{ fontSize: 9, color: '#64748b', fontFamily: 'monospace', textTransform: 'uppercase', marginBottom: 4 }}>Today</div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: '#e2e8f0' }}>
+                          {new Date().toLocaleDateString('en-AU', { day: 'numeric', month: 'short' })}
+                        </div>
+                      </div>
+                      <div style={{ backgroundColor: '#1e2d42', borderRadius: 10, padding: 10, textAlign: 'center' }}>
+                        <div style={{ fontSize: 9, color: '#64748b', fontFamily: 'monospace', textTransform: 'uppercase', marginBottom: 4 }}>Status</div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: isCheckedIn ? '#4ade80' : '#94a3b8' }}>
+                          {isCheckedIn && session ? `Since ${fmtT(session.check_in)}` : 'Not checked in'}
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                  <div className="bg-[#1e2d42] rounded-xl p-3 text-center">
-                    <div className="text-xs text-slate-500 font-mono mb-1">STATUS</div>
-                    <div className={`text-sm font-semibold ${isCheckedIn ? 'text-green-400' : 'text-slate-400'}`}>
-                      {isCheckedIn && session ? `Since ${fmtT(session.check_in)}` : 'Not checked in'}
+
+                    <div style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace', textAlign: 'center', marginBottom: 14 }}>
+                      Match: {confidence}% · Liveness: ✓ Verified
                     </div>
+
+                    {isCheckedIn ? (
+                        <button onClick={checkOut}
+                                style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: '#d97706', color: '#fff', border: 'none', borderRadius: 12, padding: '16px 24px', fontSize: 16, fontWeight: 600, cursor: 'pointer' }}
+                                onMouseEnter={e => (e.currentTarget as HTMLElement).style.backgroundColor = '#b45309'}
+                                onMouseLeave={e => (e.currentTarget as HTMLElement).style.backgroundColor = '#d97706'}
+                        >
+                          <LogOut size={20} /> End Shift
+                        </button>
+                    ) : (
+                        <button onClick={checkIn}
+                                style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: '#16a34a', color: '#fff', border: 'none', borderRadius: 12, padding: '16px 24px', fontSize: 16, fontWeight: 600, cursor: 'pointer' }}
+                                onMouseEnter={e => (e.currentTarget as HTMLElement).style.backgroundColor = '#15803d'}
+                                onMouseLeave={e => (e.currentTarget as HTMLElement).style.backgroundColor = '#16a34a'}
+                        >
+                          <LogIn size={20} /> Start Work
+                        </button>
+                    )}
                   </div>
-                </div>
-
-                <div className="text-xs text-slate-500 font-mono text-center mb-3">
-                  Match confidence: {confidence}% · Liveness: ✓ Verified
-                </div>
-
-                {isCheckedIn ? (
-                  <button onClick={checkOut}
-                    className="w-full flex items-center justify-center gap-2.5 bg-amber-600 hover:bg-amber-700 text-white font-semibold py-4 rounded-xl text-base transition-colors">
-                    <LogOut size={20} /> End Shift
+                  <button onClick={() => { setState('idle'); setEmployee(null); setSession(null); }}
+                          style={{ width: '100%', fontSize: 12, color: '#475569', background: 'none', border: 'none', cursor: 'pointer', padding: '8px 0' }}>
+                    Not you? Cancel
                   </button>
-                ) : (
-                  <button onClick={checkIn}
-                    className="w-full flex items-center justify-center gap-2.5 bg-green-600 hover:bg-green-700 text-white font-semibold py-4 rounded-xl text-base transition-colors">
-                    <LogIn size={20} /> Start Work
-                  </button>
-                )}
-              </div>
-              <button onClick={() => { setState('idle'); setEmployee(null); setSession(null); }}
-                className="w-full text-xs text-slate-600 hover:text-slate-400 transition-colors py-2">
-                Not you? Cancel
-              </button>
-            </div>
-          )}
-
-          {/* Checked in */}
-          {state === 'checked_in' && employee && (
-            <div className="text-center py-6">
-              <div className="w-20 h-20 bg-green-900/30 border-2 border-green-500 rounded-full flex items-center justify-center mx-auto mb-4">
-                <CheckCircle size={36} className="text-green-400" />
-              </div>
-              <div className="text-xl font-semibold text-green-400 mb-1">Welcome, {employee.first_name}!</div>
-              <div className="text-sm text-slate-400 mb-3">{actionMsg}</div>
-              {session?.check_in && (
-                <div className="inline-block bg-[#1e2d42] border border-[#2a3a52] rounded-xl px-4 py-2.5">
-                  <div className="text-xs text-slate-500 font-mono">CHECKED IN AT</div>
-                  <div className="text-2xl font-semibold text-slate-100 font-mono mt-1">{fmtT(session.check_in)}</div>
                 </div>
-              )}
-              <div className="flex items-center justify-center gap-2 mt-4 text-xs text-slate-500">
-                <Clock size={12} /> Resetting shortly…
-              </div>
-            </div>
-          )}
+            )}
 
-          {/* Checked out */}
-          {state === 'checked_out' && employee && (
-            <div className="text-center py-6">
-              <div className="w-20 h-20 bg-amber-900/30 border-2 border-amber-500 rounded-full flex items-center justify-center mx-auto mb-4">
-                <LogOut size={36} className="text-amber-400" />
-              </div>
-              <div className="text-xl font-semibold text-amber-400 mb-1">Goodbye, {employee.first_name}!</div>
-              <div className="text-sm text-slate-400 mb-3">{actionMsg}</div>
-              {session && (
-                <div className="bg-[#1e2d42] border border-[#2a3a52] rounded-xl p-4 text-left space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span className="text-slate-500">Started</span>
-                    <span className="font-mono text-slate-300">{fmtT(session.check_in)}</span>
+            {/* Checked in */}
+            {state === 'checked_in' && employee && (
+                <div style={{ textAlign: 'center', padding: '24px 0' }}>
+                  <div style={{ width: 72, height: 72, backgroundColor: '#14532d22', border: '2px solid #16a34a', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+                    <CheckCircle size={32} style={{ color: '#4ade80' }} />
                   </div>
-                  {session.check_out && (
-                    <div className="flex justify-between text-sm">
-                      <span className="text-slate-500">Finished</span>
-                      <span className="font-mono text-slate-300">{fmtT(session.check_out)}</span>
-                    </div>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: '#4ade80', marginBottom: 6 }}>Welcome, {employee.first_name}!</div>
+                  <div style={{ fontSize: 13, color: '#64748b', marginBottom: 16 }}>{actionMsg}</div>
+                  {session?.check_in && (
+                      <div style={{ display: 'inline-block', backgroundColor: '#1e2d42', border: '1px solid #2a3a52', borderRadius: 12, padding: '12px 24px' }}>
+                        <div style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace', textTransform: 'uppercase', marginBottom: 4 }}>Checked in at</div>
+                        <div style={{ fontSize: 28, fontWeight: 700, color: '#f1f5f9', fontFamily: 'monospace' }}>{fmtT(session.check_in)}</div>
+                      </div>
                   )}
-                  {session.duration_mins && (
-                    <div className="flex justify-between text-sm border-t border-[#2a3a52] pt-2">
-                      <span className="text-slate-400 font-medium">Total Time</span>
-                      <span className="font-mono font-semibold text-green-400">
+                  <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: 11, color: '#475569' }}>
+                    <Clock size={11} /> Resetting shortly…
+                  </div>
+                </div>
+            )}
+
+            {/* Checked out */}
+            {state === 'checked_out' && employee && (
+                <div style={{ textAlign: 'center', padding: '24px 0' }}>
+                  <div style={{ width: 72, height: 72, backgroundColor: '#78350f22', border: '2px solid #d97706', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+                    <LogOut size={32} style={{ color: '#fcd34d' }} />
+                  </div>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: '#fcd34d', marginBottom: 6 }}>Goodbye, {employee.first_name}!</div>
+                  <div style={{ fontSize: 13, color: '#64748b', marginBottom: 16 }}>{actionMsg}</div>
+                  {session && (
+                      <div style={{ backgroundColor: '#1e2d42', border: '1px solid #2a3a52', borderRadius: 12, padding: 16, textAlign: 'left' }}>
+                        {[
+                          { label: 'Started',  value: fmtT(session.check_in) },
+                          { label: 'Finished', value: session.check_out ? fmtT(session.check_out) : '—' },
+                        ].map(row => (
+                            <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 8 }}>
+                              <span style={{ color: '#64748b' }}>{row.label}</span>
+                              <span style={{ fontFamily: 'monospace', color: '#e2e8f0' }}>{row.value}</span>
+                            </div>
+                        ))}
+                        {session.duration_mins && (
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, paddingTop: 10, borderTop: '1px solid #2a3a52', marginTop: 4 }}>
+                              <span style={{ fontWeight: 600, color: '#e2e8f0' }}>Total Time</span>
+                              <span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#4ade80' }}>
                         {Math.floor(session.duration_mins / 60)}h {Math.round(session.duration_mins % 60)}m
                       </span>
-                    </div>
+                            </div>
+                        )}
+                      </div>
                   )}
                 </div>
-              )}
-            </div>
-          )}
+            )}
+          </div>
         </div>
-      </div>
 
-      <div className="text-center py-2 text-[10px] text-slate-700 font-mono border-t border-[#1e2d42]">
-        PeopleCore Kiosk · Liveness Detection Active · Face data is encrypted
-      </div>
+        {/* Footer */}
+        <div style={{ textAlign: 'center', padding: '8px 0', fontSize: 10, color: '#1e293b', fontFamily: 'monospace', borderTop: '1px solid #1e2d42' }}>
+          PeopleCore Kiosk · Liveness Detection Active · Face data encrypted
+        </div>
 
-      <style jsx global>{`
+        <style>{`
         @keyframes scanMove { 0% { top: 10%; } 100% { top: 90%; } }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
       `}</style>
-    </div>
+      </div>
   );
 }

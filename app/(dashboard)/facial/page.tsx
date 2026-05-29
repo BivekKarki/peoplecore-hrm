@@ -30,22 +30,27 @@ export default function FacialPage() {
       setProgress((p) => {
         if (p >= 100) {
           if (timerRef.current) clearInterval(timerRef.current);
-          const success = Math.random() > 0.2;
-          const name = enrolled[Math.floor(Math.random() * enrolled.length)];
-          setResult(success ? 'success' : 'fail');
-          setScanning(false);
-          setProgress(0);
-          if (success) {
-            setMatched(name);
-            showToast(`Welcome, ${name}!`, 'success');
-          } else {
-            showToast('Face not recognized', 'error');
-          }
-          const now = new Date();
-          const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-          setHistory((prev) => [{ name: success ? name : 'Unknown', time: timeStr, success }, ...prev].slice(0, 10));
-          setTimeout(() => setResult('idle'), 4000);
-          return 0;
+
+          // Defer ALL state updates outside the updater function
+          setTimeout(() => {
+            const success = Math.random() > 0.2;
+            const name    = enrolled[Math.floor(Math.random() * enrolled.length)];
+            const timeStr = new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+
+            setResult(success ? 'success' : 'fail');
+            setScanning(false);
+            setProgress(0);
+            if (success) {
+              setMatched(name);
+              showToast(`Welcome, ${name}!`, 'success');
+            } else {
+              showToast('Face not recognized', 'error');
+            }
+            setHistory(prev => [{ name: success ? name : 'Unknown', time: timeStr, success }, ...prev].slice(0, 10));
+            setTimeout(() => setResult('idle'), 4000);
+          }, 0);
+
+          return 100;
         }
         return p + 2;
       });

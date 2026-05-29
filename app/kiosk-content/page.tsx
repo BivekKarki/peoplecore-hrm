@@ -27,7 +27,7 @@ export default function KioskPage() {
   const videoRef          = useRef<HTMLVideoElement>(null);
   const canvasRef         = useRef<HTMLCanvasElement>(null);
   const streamRef         = useRef<MediaStream | null>(null);
-  const faceApiRef        = useRef<typeof import('face-api.js') | null>(null);
+  const faceApiRef        = useRef<typeof import('@vladmandic/face-api') | null>(null);
   const detectionLoopRef  = useRef<ReturnType<typeof setInterval> | null>(null);
   const resetTimerRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -68,7 +68,7 @@ export default function KioskPage() {
   useEffect(() => {
     const init = async () => {
       try {
-        const api = await import('face-api.js');
+        const api = await import('@vladmandic/face-api');
         await Promise.all([
           api.nets.tinyFaceDetector.loadFromUri('/models'),
           api.nets.faceLandmark68Net.loadFromUri('/models'),
