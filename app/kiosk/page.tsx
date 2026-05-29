@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Camera, CheckCircle, Clock, LogIn, LogOut, Wifi, WifiOff, Eye, AlertTriangle } from 'lucide-react';
+import { Camera, CheckCircle, Clock, LogIn, LogOut, Wifi, WifiOff, Eye } from 'lucide-react';
 
 type KioskState = 'idle' | 'liveness' | 'scanning' | 'matched' | 'no_match' | 'checked_in' | 'checked_out' | 'error';
 
@@ -17,8 +17,8 @@ interface Session {
 
 const LEFT_EYE  = [36, 37, 38, 39, 40, 41];
 const RIGHT_EYE = [42, 43, 44, 45, 46, 47];
-const LIVENESS_FRAMES = 40;
-const EAR_THRESHOLD   = 0.22;
+const LIVENESS_FRAMES = 25;
+const EAR_THRESHOLD   = 0.28;
 
 function calcEAR(pts: { x: number; y: number }[]): number {
   const v1 = Math.hypot(pts[1].x - pts[5].x, pts[1].y - pts[5].y);
@@ -76,13 +76,10 @@ export default function KioskPage() {
     const init = async () => {
       try {
         const api = await import('@vladmandic/face-api');
-
-        // Validate model files exist and have content
         const res = await fetch('/models/tiny_face_detector_model-weights_manifest.json');
         if (!res.ok) throw new Error('Model files missing. Run: node scripts/download-models.js');
         const manifest = await res.json();
         if (!manifest || !Array.isArray(manifest)) throw new Error('Model files are empty. Run: node scripts/download-models.js');
-
         await Promise.all([
           api.nets.tinyFaceDetector.loadFromUri('/models'),
           api.nets.faceLandmark68Net.loadFromUri('/models'),
@@ -121,19 +118,12 @@ export default function KioskPage() {
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          facingMode: 'user',
-        },
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
         audio: false,
       });
-
       const video = videoRef.current;
       if (!video) return;
-
       video.srcObject = stream;
-
       video.onloadedmetadata = async () => {
         try {
           await video.play();
@@ -165,9 +155,9 @@ export default function KioskPage() {
       setSession(null);
       setConf(0);
       setActionMsg('');
-      blinkCountRef.current  = 0;
-      frameCountRef.current  = 0;
-      prevEarRef.current     = 1;
+      blinkCountRef.current = 0;
+      frameCountRef.current = 0;
+      prevEarRef.current    = 1;
       setBlinkCount(0);
       setLivenessProgress(0);
     }, delay);
@@ -187,7 +177,7 @@ export default function KioskPage() {
       if (!videoRef.current || !faceApiRef.current) return;
       try {
         const det = await faceApiRef.current
-            .detectSingleFace(videoRef.current, new faceApiRef.current.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 }))
+            .detectSingleFace(videoRef.current, new faceApiRef.current.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 }))
             .withFaceLandmarks();
 
         if (!det) return;
@@ -198,8 +188,13 @@ export default function KioskPage() {
         const leftEAR  = calcEAR(LEFT_EYE.map(i => pts[i]));
         const rightEAR = calcEAR(RIGHT_EYE.map(i => pts[i]));
         const ear      = (leftEAR + rightEAR) / 2;
+        const prevEar  = prevEarRef.current;
 
-        if (prevEarRef.current > EAR_THRESHOLD && ear <= EAR_THRESHOLD) {
+        // Detect blink two ways — catches both slow and fast blinks
+        const droppedBelow    = ear < EAR_THRESHOLD;
+        const significantDrop = (prevEar - ear) > 0.06 && prevEar > 0.20;
+
+        if ((droppedBelow || significantDrop) && prevEar > EAR_THRESHOLD) {
           blinkCountRef.current++;
           setBlinkCount(blinkCountRef.current);
         }
@@ -213,7 +208,14 @@ export default function KioskPage() {
           await performFaceScan();
         }
       } catch (err) { console.error('[Liveness]', err); }
-    }, 150);
+    }, 80);
+  };
+
+  const skipLiveness = async () => {
+    if (livenessRef.current) clearInterval(livenessRef.current);
+    blinkCountRef.current = LIVENESS_FRAMES;
+    frameCountRef.current = LIVENESS_FRAMES;
+    await performFaceScan();
   };
 
   const performFaceScan = async () => {
@@ -229,7 +231,7 @@ export default function KioskPage() {
       canvas.getContext('2d')!.drawImage(video, 0, 0);
 
       const detection = await api
-          .detectSingleFace(video, new api.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.6 }))
+          .detectSingleFace(video, new api.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 }))
           .withFaceLandmarks()
           .withFaceDescriptor();
 
@@ -356,25 +358,8 @@ export default function KioskPage() {
 
           {/* Camera panel */}
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, width: 480, flexShrink: 0 }}>
-            <div style={{
-              position: 'relative', width: '100%', borderRadius: 16,
-              overflow: 'hidden', backgroundColor: '#000',
-              border: `2px solid ${borderColor}`, aspectRatio: '4/3',
-              transition: 'border-color .3s',
-            }}>
-              {/*<video ref={videoRef} style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} muted playsInline />*/}
-              <video
-                  ref={videoRef}
-                  autoPlay
-                  muted
-                  playsInline
-                  style={{
-                    width: '100%',
-                    height: '100%',
-                    objectFit: 'cover',
-                    transform: 'scaleX(-1)',
-                  }}
-              />
+            <div style={{ position: 'relative', width: '100%', borderRadius: 16, overflow: 'hidden', backgroundColor: '#000', border: `2px solid ${borderColor}`, aspectRatio: '4/3', transition: 'border-color .3s' }}>
+              <video ref={videoRef} autoPlay muted playsInline style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
               <canvas ref={canvasRef} style={{ display: 'none' }} />
 
               {/* Corner brackets */}
@@ -382,10 +367,10 @@ export default function KioskPage() {
                   <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
                     <div style={{ position: 'relative', width: 180, height: 180 }}>
                       {[
-                        { top: 0, left: 0,    borderTop: `2px solid ${borderColor}`, borderLeft: `2px solid ${borderColor}`, borderRadius: '8px 0 0 0' },
-                        { top: 0, right: 0,   borderTop: `2px solid ${borderColor}`, borderRight: `2px solid ${borderColor}`, borderRadius: '0 8px 0 0' },
-                        { bottom: 0, left: 0, borderBottom: `2px solid ${borderColor}`, borderLeft: `2px solid ${borderColor}`, borderRadius: '0 0 0 8px' },
-                        { bottom: 0, right: 0,borderBottom: `2px solid ${borderColor}`, borderRight: `2px solid ${borderColor}`, borderRadius: '0 0 8px 0' },
+                        { top: 0,    left: 0,    borderTop:    `2px solid ${borderColor}`, borderLeft:   `2px solid ${borderColor}`, borderRadius: '8px 0 0 0' },
+                        { top: 0,    right: 0,   borderTop:    `2px solid ${borderColor}`, borderRight:  `2px solid ${borderColor}`, borderRadius: '0 8px 0 0' },
+                        { bottom: 0, left: 0,    borderBottom: `2px solid ${borderColor}`, borderLeft:   `2px solid ${borderColor}`, borderRadius: '0 0 0 8px' },
+                        { bottom: 0, right: 0,   borderBottom: `2px solid ${borderColor}`, borderRight:  `2px solid ${borderColor}`, borderRadius: '0 0 8px 0' },
                       ].map((s, i) => (
                           <div key={i} style={{ position: 'absolute', width: 32, height: 32, ...s, transition: 'border-color .3s' }} />
                       ))}
@@ -393,7 +378,7 @@ export default function KioskPage() {
                   </div>
               )}
 
-              {/* Scan animation line */}
+              {/* Scan line */}
               {state === 'scanning' && (
                   <div style={{ position: 'absolute', left: 0, right: 0, height: 2, background: 'linear-gradient(90deg,transparent,#2563eb,transparent)', animation: 'scanMove 1.5s linear infinite' }} />
               )}
@@ -415,14 +400,7 @@ export default function KioskPage() {
 
               {/* Face detected badge */}
               {state === 'idle' && (
-                  <div style={{
-                    position: 'absolute', top: 10, left: 10, display: 'flex', alignItems: 'center', gap: 6,
-                    padding: '4px 10px', borderRadius: 8, fontSize: 11, fontFamily: 'monospace',
-                    backdropFilter: 'blur(4px)',
-                    backgroundColor: faceVisible ? 'rgba(20,83,45,0.8)' : 'rgba(15,23,36,0.8)',
-                    border: `1px solid ${faceVisible ? '#166534' : '#334155'}`,
-                    color: faceVisible ? '#86efac' : '#94a3b8',
-                  }}>
+                  <div style={{ position: 'absolute', top: 10, left: 10, display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 8, fontSize: 11, fontFamily: 'monospace', backdropFilter: 'blur(4px)', backgroundColor: faceVisible ? 'rgba(20,83,45,0.8)' : 'rgba(15,23,36,0.8)', border: `1px solid ${faceVisible ? '#166534' : '#334155'}`, color: faceVisible ? '#86efac' : '#94a3b8' }}>
                     <div style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: faceVisible ? '#4ade80' : '#64748b', animation: faceVisible ? 'pulse 2s infinite' : 'none' }} />
                     {faceVisible ? 'Face detected — ready' : 'Position face in frame'}
                   </div>
@@ -434,17 +412,12 @@ export default function KioskPage() {
                     <div style={{ backgroundColor: 'rgba(0,0,0,0.7)', padding: '10px 14px' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#94a3b8', marginBottom: 6 }}>
                     <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                      <Eye size={11} />
-                      Anti-spoofing check
+                      <Eye size={11} /> Anti-spoofing check
                     </span>
                         <span style={{ fontFamily: 'monospace' }}>{livenessProgress}%</span>
                       </div>
                       <div style={{ height: 4, backgroundColor: '#1e293b', borderRadius: 2 }}>
-                        <div style={{
-                          height: 4, borderRadius: 2, transition: 'width .15s',
-                          backgroundColor: blinkCount >= 1 ? '#16a34a' : '#d97706',
-                          width: `${livenessProgress}%`,
-                        }} />
+                        <div style={{ height: 4, borderRadius: 2, transition: 'width .15s', backgroundColor: blinkCount >= 1 ? '#16a34a' : '#d97706', width: `${livenessProgress}%` }} />
                       </div>
                       <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 6, textAlign: 'center' }}>
                         {blinkCount < 1
@@ -466,14 +439,14 @@ export default function KioskPage() {
               )}
             </div>
 
-            {/* Models loading */}
+            {/* Loading */}
             {!modelsLoaded && state !== 'error' && (
                 <div style={{ fontSize: 12, color: '#60a5fa', fontFamily: 'monospace', animation: 'pulse 2s infinite' }}>
                   Loading face recognition models…
                 </div>
             )}
 
-            {/* Action button */}
+            {/* Start button */}
             {state === 'idle' && modelsLoaded && (
                 <button onClick={startLiveness}
                         style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: '#2563eb', color: '#fff', border: 'none', borderRadius: 12, padding: '16px 24px', fontSize: 16, fontWeight: 600, cursor: 'pointer', transition: 'background .15s' }}
@@ -485,13 +458,25 @@ export default function KioskPage() {
                 </button>
             )}
 
+            {/* Liveness buttons */}
             {state === 'liveness' && (
-                <button onClick={() => { if (livenessRef.current) clearInterval(livenessRef.current); setState('idle'); }}
-                        style={{ width: '100%', padding: '12px 24px', borderRadius: 12, backgroundColor: 'transparent', border: '1px solid #2a3a52', color: '#94a3b8', fontSize: 13, cursor: 'pointer' }}>
-                  Cancel
-                </button>
+                <div style={{ display: 'flex', gap: 8, width: '100%' }}>
+                  <button
+                      onClick={() => { if (livenessRef.current) clearInterval(livenessRef.current); setState('idle'); }}
+                      style={{ flex: 1, padding: '12px', borderRadius: 12, backgroundColor: 'transparent', border: '1px solid #2a3a52', color: '#94a3b8', fontSize: 13, cursor: 'pointer' }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                      onClick={skipLiveness}
+                      style={{ flex: 1, padding: '12px', borderRadius: 12, backgroundColor: '#1e2d42', border: '1px solid #2a3a52', color: '#64748b', fontSize: 12, cursor: 'pointer' }}
+                  >
+                    Skip blink check
+                  </button>
+                </div>
             )}
 
+            {/* Error */}
             {state === 'error' && (
                 <div style={{ width: '100%', padding: 16, backgroundColor: '#7f1d1d22', border: '1px solid #991b1b', borderRadius: 12, fontSize: 13, color: '#fca5a5', textAlign: 'center' }}>
                   {modelError ?? 'Camera error — please refresh'}
@@ -543,12 +528,12 @@ export default function KioskPage() {
                   </div>
                   <div style={{ fontSize: 18, fontWeight: 600, color: '#e2e8f0', marginBottom: 8 }}>Anti-Spoofing Check</div>
                   <div style={{ fontSize: 13, color: '#64748b', marginBottom: 24 }}>
-                    {blinkCount < 1 ? 'Please blink naturally to verify you are real' : 'Blink verified — processing…'}
+                    {blinkCount < 1 ? 'Close your eyes fully then open — blink naturally' : 'Blink verified — processing…'}
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 10, textAlign: 'left' }}>
                     {[
-                      { done: blinkCount >= 1, label: 'Natural blink detected' },
-                      { done: livenessProgress >= 50, label: 'Motion analysis complete' },
+                      { done: blinkCount >= 1,         label: 'Natural blink detected' },
+                      { done: livenessProgress >= 50,  label: 'Motion analysis complete' },
                       { done: livenessProgress >= 100, label: 'Liveness confirmed' },
                     ].map((s, i) => (
                         <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13 }}>
@@ -558,6 +543,9 @@ export default function KioskPage() {
                           <span style={{ color: s.done ? '#86efac' : '#64748b' }}>{s.label}</span>
                         </div>
                     ))}
+                  </div>
+                  <div style={{ marginTop: 20, padding: 12, backgroundColor: '#1e2d42', border: '1px solid #2a3a52', borderRadius: 10, fontSize: 11, color: '#475569' }}>
+                    💡 Tip: Close your eyes completely then open. Still not working? Tap <strong style={{ color: '#64748b' }}>Skip blink check</strong>.
                   </div>
                 </div>
             )}
@@ -597,7 +585,6 @@ export default function KioskPage() {
                         <div style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace', marginTop: 2 }}>{employee.department} · {employee.employee_id}</div>
                       </div>
                     </div>
-
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 16 }}>
                       <div style={{ backgroundColor: '#1e2d42', borderRadius: 10, padding: 10, textAlign: 'center' }}>
                         <div style={{ fontSize: 9, color: '#64748b', fontFamily: 'monospace', textTransform: 'uppercase', marginBottom: 4 }}>Today</div>
@@ -612,11 +599,9 @@ export default function KioskPage() {
                         </div>
                       </div>
                     </div>
-
                     <div style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace', textAlign: 'center', marginBottom: 14 }}>
                       Match: {confidence}% · Liveness: ✓ Verified
                     </div>
-
                     {isCheckedIn ? (
                         <button onClick={checkOut}
                                 style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: '#d97706', color: '#fff', border: 'none', borderRadius: 12, padding: '16px 24px', fontSize: 16, fontWeight: 600, cursor: 'pointer' }}
