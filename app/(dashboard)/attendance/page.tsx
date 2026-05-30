@@ -123,7 +123,7 @@ export default function AttendancePage() {
             <Card className="p-4">
               <div className="text-xs font-semibold text-slate-300 mb-3">Attendance Heatmap</div>
               <div className="flex gap-1">
-                {['M','T','W','T','F'].map(d=>(
+                {['M','T','W','TH','F'].map(d=>(
                   <div key={d} className="flex-1 text-center text-[9px] text-slate-600 font-mono mb-1">{d}</div>
                 ))}
               </div>
