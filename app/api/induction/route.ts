@@ -1,0 +1,163 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { query } from '@/lib/db';
+import { getSession, requireAuth } from '@/lib/auth';
+
+export async function GET(req: NextRequest) {
+    const user = await getSession();
+    const authError = requireAuth(user);
+    if (authError) return authError;
+
+    const { searchParams } = new URL(req.url);
+    const status      = searchParams.get('status');
+    const employee_id = searchParams.get('employee_id');
+
+    const conditions: string[] = [];
+    const params: unknown[]    = [];
+    let idx = 1;
+
+    if (status)      { conditions.push(`i.status = $${idx++}`);      params.push(status); }
+    if (employee_id) { conditions.push(`i.employee_id = $${idx++}`); params.push(employee_id); }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    try {
+        const res = await query<{
+            id: string; employee_id: string; status: string; step: number;
+            personal_details_done: boolean; documents_done: boolean;
+            training_done: boolean; it_setup_done: boolean;
+            welcome_pack_sent: boolean; contract_signed: boolean;
+            payroll_setup_done: boolean; team_intro_done: boolean;
+            notes: string | null; completed_at: string | null;
+            created_at: string; updated_at: string;
+            first_name: string; last_name: string;
+            department: string; job_title: string; email: string;
+            avatar_color: string; employee_code: string;
+        }>(`
+      SELECT
+        i.*,
+        e.first_name, e.last_name, e.department,
+        e.job_title, e.email, e.avatar_color,
+        e.employee_id AS employee_code
+      FROM inductions i
+      JOIN employees e ON e.id = i.employee_id
+      ${where}
+      ORDER BY
+        CASE i.status
+          WHEN 'in_progress' THEN 1
+          WHEN 'not_started' THEN 2
+          WHEN 'completed'   THEN 3
+        END,
+        i.updated_at DESC
+    `, params);
+
+        const all         = res.rows;
+        const not_started = all.filter(r => r.status === 'not_started').length;
+        const in_progress = all.filter(r => r.status === 'in_progress').length;
+        const completed   = all.filter(r => r.status === 'completed').length;
+
+        return NextResponse.json({
+            data:  res.rows,
+            stats: { total: all.length, not_started, in_progress, completed },
+        });
+    } catch (err) {
+        console.error('[Inductions GET]', err);
+        return NextResponse.json({ error: 'Failed to fetch inductions' }, { status: 500 });
+    }
+}
+
+export async function POST(req: NextRequest) {
+    const user = await getSession();
+    const authError = requireAuth(user);
+    if (authError) return authError;
+
+    try {
+        const body = await req.json();
+        const { employee_id } = body;
+
+        if (!employee_id) {
+            return NextResponse.json({ error: 'employee_id required' }, { status: 400 });
+        }
+
+        const existing = await query(
+            'SELECT id FROM inductions WHERE employee_id = $1',
+            [employee_id]
+        );
+        if (existing.rowCount) {
+            return NextResponse.json({ error: 'Induction already exists for this employee' }, { status: 409 });
+        }
+
+        const res = await query(
+            `INSERT INTO inductions (employee_id, status, step)
+       VALUES ($1, 'not_started', 1)
+       RETURNING *`,
+            [employee_id]
+        );
+
+        return NextResponse.json({ data: res.rows[0] }, { status: 201 });
+    } catch (err) {
+        console.error('[Inductions POST]', err);
+        return NextResponse.json({ error: 'Failed to create induction' }, { status: 500 });
+    }
+}
+
+export async function PATCH(req: NextRequest) {
+    const user = await getSession();
+    const authError = requireAuth(user);
+    if (authError) return authError;
+
+    try {
+        const body = await req.json();
+        const {
+            id, step,
+            personal_details_done, documents_done, training_done, it_setup_done,
+            welcome_pack_sent, contract_signed, payroll_setup_done, team_intro_done,
+            notes, status,
+        } = body;
+
+        if (!id) return NextResponse.json({ error: 'Induction ID required' }, { status: 400 });
+
+        const allDone =
+            personal_details_done && documents_done && training_done &&
+            it_setup_done && welcome_pack_sent && contract_signed &&
+            payroll_setup_done && team_intro_done;
+
+        const derivedStatus = status ??
+            (allDone ? 'completed' : (step && step > 1) ? 'in_progress' : 'not_started');
+
+        const res = await query(
+            `UPDATE inductions SET
+        step                  = COALESCE($2,  step),
+        personal_details_done = COALESCE($3,  personal_details_done),
+        documents_done        = COALESCE($4,  documents_done),
+        training_done         = COALESCE($5,  training_done),
+        it_setup_done         = COALESCE($6,  it_setup_done),
+        welcome_pack_sent     = COALESCE($7,  welcome_pack_sent),
+        contract_signed       = COALESCE($8,  contract_signed),
+        payroll_setup_done    = COALESCE($9,  payroll_setup_done),
+        team_intro_done       = COALESCE($10, team_intro_done),
+        notes                 = COALESCE($11, notes),
+        status                = $12,
+        completed_at          = CASE WHEN $12 = 'completed' THEN NOW() ELSE completed_at END,
+        updated_at            = NOW()
+       WHERE id = $1
+       RETURNING *`,
+            [
+                id, step ?? null,
+                personal_details_done ?? null, documents_done ?? null,
+                training_done ?? null,         it_setup_done ?? null,
+                welcome_pack_sent ?? null,     contract_signed ?? null,
+                payroll_setup_done ?? null,    team_intro_done ?? null,
+                notes ?? null, derivedStatus,
+            ]
+        );
+
+        if (!res.rowCount) {
+            return NextResponse.json({ error: 'Induction not found' }, { status: 404 });
+        }
+
+        return NextResponse.json({ data: res.rows[0] });
+    } catch (err) {
+        console.error('[Inductions PATCH]', err);
+        return NextResponse.json({ error: 'Failed to update induction' }, { status: 500 });
+    }
+}

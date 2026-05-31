@@ -68,11 +68,14 @@ export function Button({ variant = 'ghost', size = 'md', loading, children, clas
 }
 
 // ─── CARD ────────────────────────────────────────────────────────────────────
-export function Card({ children, className = '' }: { children: React.ReactNode; className?: string }) {
+export function Card({ children, className = '', style }: { children: React.ReactNode; className?: string; style?: React.CSSProperties }) {
   return (
-    <div className={`bg-[#162030] border border-[#2a3a52] rounded-xl ${className}`}>
-      {children}
-    </div>
+      <div
+          className={className}
+          style={{ backgroundColor: '#162030', border: '1px solid #2a3a52', borderRadius: 12, ...style }}
+      >
+        {children}
+      </div>
   );
 }
 
