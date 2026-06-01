@@ -130,12 +130,13 @@ export default function InductionPage() {
     setLoading(true);
     try {
       const [indRes, empRes] = await Promise.all([
-        fetch('/api/inductions').then(r => r.json()),
-        fetch('/api/employees?limit=200&status=active').then(r => r.json()),
+        fetch('/api/induction').then(r => r.json()).catch(e => { console.error('Inductions fetch failed:', e); return { data: [] }; }),
+        fetch('/api/employees?limit=200').then(r => r.json()).catch(e => { console.error('Employees fetch failed:', e); return { data: [] }; }),
       ]);
       setInductions(indRes.data ?? []);
       setEmployees(empRes.data ?? []);
-    } catch {
+    } catch (err) {
+      console.error('Load error:', err);
       showToast('Failed to load inductions', 'error');
     } finally {
       setLoading(false);
@@ -167,7 +168,7 @@ export default function InductionPage() {
     if (!selected) return;
     setSaving(true);
     try {
-      const r = await fetch('/api/inductions', {
+      const r = await fetch('/api/induction', {
         method:  'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -206,7 +207,7 @@ export default function InductionPage() {
     if (!newEmpId) { showToast('Select an employee', 'error'); return; }
     setCreating(true);
     try {
-      const r = await fetch('/api/inductions', {
+      const r = await fetch('/api/induction', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ employee_id: newEmpId }),
