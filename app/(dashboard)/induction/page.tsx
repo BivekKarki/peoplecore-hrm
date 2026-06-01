@@ -556,15 +556,29 @@ export default function InductionPage() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <Select label="Select Employee" value={newEmpId} onChange={e => setNewEmpId(e.target.value)}>
               <option value="">Choose employee…</option>
-              {uninducted.map(emp => (
-                  <option key={emp.id} value={emp.id}>{emp.first_name} {emp.last_name} — {emp.department}</option>
-              ))}
+              {employees.map(emp => {
+                const hasInduction = inductedIds.has(emp.id);
+                return (
+                    <option key={emp.id} value={emp.id} disabled={hasInduction}>
+                      {emp.first_name} {emp.last_name} — {emp.department}
+                      {hasInduction ? ' (already inducted)' : ''}
+                    </option>
+                );
+              })}
             </Select>
-            {uninducted.length === 0 && (
-                <div style={{ padding: '12px 14px', backgroundColor: '#14532d22', border: '1px solid #166534', borderRadius: 10, fontSize: 13, color: '#86efac' }}>
-                  ✓ All active employees have an induction record.
+
+            {employees.length === 0 && (
+                <div style={{ padding: '12px 14px', backgroundColor: '#7f1d1d22', border: '1px solid #991b1b', borderRadius: 10, fontSize: 13, color: '#fca5a5' }}>
+                  No employees found. Add employees first.
                 </div>
             )}
+
+            {employees.length > 0 && employees.every(e => inductedIds.has(e.id)) && (
+                <div style={{ padding: '12px 14px', backgroundColor: '#14532d22', border: '1px solid #166534', borderRadius: 10, fontSize: 13, color: '#86efac' }}>
+                  ✓ All employees already have an induction record.
+                </div>
+            )}
+
             <div style={{ padding: '12px 14px', backgroundColor: '#1e2d42', border: '1px solid #2a3a52', borderRadius: 10, fontSize: 12, color: '#64748b', lineHeight: 1.6 }}>
               Creates a 5-step induction wizard: welcome, documents, training, IT setup, and completion.
             </div>
