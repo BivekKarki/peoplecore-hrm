@@ -121,21 +121,21 @@ export async function PATCH(req: NextRequest) {
 
         const res = await query(
             `UPDATE inductions SET
-                                   step                  = COALESCE($2,  step),
-                                   personal_details_done = COALESCE($3,  personal_details_done),
-                                   documents_done        = COALESCE($4,  documents_done),
-                                   training_done         = COALESCE($5,  training_done),
-                                   it_setup_done         = COALESCE($6,  it_setup_done),
-                                   welcome_pack_sent     = COALESCE($7,  welcome_pack_sent),
-                                   contract_signed       = COALESCE($8,  contract_signed),
-                                   payroll_setup_done    = COALESCE($9,  payroll_setup_done),
-                                   team_intro_done       = COALESCE($10, team_intro_done),
-                                   notes                 = COALESCE($11, notes),
-                                   status                = $12,
-                                   completed_at = CASE WHEN $12 = 'completed' THEN NOW() ELSE completed_at END,
-                                   updated_at   = NOW()
-             WHERE id = $1
-                 RETURNING *`,
+                                   step                  = COALESCE($2::int,     step),
+                                   personal_details_done = COALESCE($3::boolean, personal_details_done),
+                                   documents_done        = COALESCE($4::boolean, documents_done),
+                                   training_done         = COALESCE($5::boolean, training_done),
+                                   it_setup_done         = COALESCE($6::boolean, it_setup_done),
+                                   welcome_pack_sent     = COALESCE($7::boolean, welcome_pack_sent),
+                                   contract_signed       = COALESCE($8::boolean, contract_signed),
+                                   payroll_setup_done    = COALESCE($9::boolean, payroll_setup_done),
+                                   team_intro_done       = COALESCE($10::boolean, team_intro_done),
+                                   notes                 = COALESCE($11::text,   notes),
+                                   status                = $12::varchar,
+    completed_at = CASE WHEN $12::varchar = 'completed' THEN NOW() ELSE completed_at END,
+    updated_at   = NOW()
+   WHERE id = $1
+            RETURNING *`,
             [
                 id,
                 step                  ?? null,

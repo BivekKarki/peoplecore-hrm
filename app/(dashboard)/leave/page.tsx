@@ -2,21 +2,43 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { Topbar } from '@/components/layout/Topbar';
-import { Card, Badge, Button, Modal, Select, Textarea, Input, Spinner, EmptyState, showToast, StatCard } from '@/components/ui';
-import { LeaveRequest } from '@/types';
+import { Card, Badge, Button, Modal, Select, Input, Spinner, EmptyState, StatCard, showToast } from '@/components/ui';
 import { formatDate } from '@/lib/utils';
-import { CheckCircle, XCircle, Plus, Calendar } from 'lucide-react';
+import { CheckCircle, XCircle, Plus, Calendar, Clock, Users, AlertCircle } from 'lucide-react';
 
-const LEAVE_TYPES = ['annual','sick','parental','unpaid','compassionate','long_service'];
+interface LeaveRequest {
+  id: string; employee_id: string; leave_type: string;
+  start_date: string; end_date: string; days: number;
+  status: string; reason: string | null; denial_reason: string | null;
+  employee_name: string; approver_name: string | null;
+  created_at: string;
+}
+
+const LEAVE_TYPES = [
+  { value: 'annual',        label: 'Annual Leave' },
+  { value: 'sick',          label: 'Sick Leave' },
+  { value: 'parental',      label: 'Parental Leave' },
+  { value: 'unpaid',        label: 'Unpaid Leave' },
+  { value: 'compassionate', label: 'Compassionate Leave' },
+  { value: 'long_service',  label: 'Long Service Leave' },
+];
+
+const STATUS_TABS = ['', 'pending', 'approved', 'denied', 'cancelled'];
 
 export default function LeavePage() {
-  const [requests, setRequests] = useState<LeaveRequest[]>([]);
-  const [loading, setLoading]   = useState(true);
-  const [filter, setFilter]     = useState('');
-  const [applyModal, setApply]  = useState(false);
-  const [saving, setSaving]     = useState(false);
-  const [form, setForm]         = useState({ employee_id:'', leave_type:'annual', start_date:'', end_date:'', reason:'' });
-  const [employees, setEmps]    = useState<{id:string;first_name:string;last_name:string}[]>([]);
+  const [requests, setRequests]   = useState<LeaveRequest[]>([]);
+  const [loading, setLoading]     = useState(true);
+  const [filter, setFilter]       = useState('');
+  const [applyModal, setApply]    = useState(false);
+  const [denyModal, setDenyModal] = useState(false);
+  const [denyId, setDenyId]       = useState<string | null>(null);
+  const [denyReason, setDenyReason] = useState('');
+  const [saving, setSaving]       = useState(false);
+  const [employees, setEmps]      = useState<{ id: string; first_name: string; last_name: string }[]>([]);
+  const [form, setForm]           = useState({
+    employee_id: '', leave_type: 'annual',
+    start_date: '', end_date: '', reason: '',
+  });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -25,137 +47,215 @@ export default function LeavePage() {
       const r = await fetch(`/api/leave${q}`);
       const j = await r.json();
       setRequests(j.data ?? []);
-    } catch { showToast('Failed to load leave requests','error'); }
+    } catch { showToast('Failed to load leave requests', 'error'); }
     finally { setLoading(false); }
   }, [filter]);
 
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
-    fetch('/api/employees?limit=100')
-      .then((r) => r.json())
-      .then((j) => setEmps(j.data ?? []));
+    fetch('/api/employees?limit=200')
+        .then(r => r.json())
+        .then(j => setEmps(j.data ?? []));
   }, []);
 
-  const action = async (id: string, act: 'approve' | 'deny') => {
-    try {
-      const r = await fetch(`/api/leave/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: act }),
-      });
-      if (!r.ok) throw new Error();
-      showToast(`Leave ${act}d`, act === 'approve' ? 'success' : 'error');
-      load();
-    } catch { showToast('Action failed','error'); }
-  };
-
   const submit = async () => {
-    if (!form.employee_id) { showToast('Select an employee','error'); return; }
-    if (!form.start_date || !form.end_date) { showToast('Select dates','error'); return; }
+    if (!form.employee_id) { showToast('Select an employee', 'error'); return; }
+    if (!form.start_date)  { showToast('Select start date', 'error'); return; }
+    if (!form.end_date)    { showToast('Select end date', 'error'); return; }
+    if (form.end_date < form.start_date) { showToast('End date must be after start date', 'error'); return; }
     setSaving(true);
     try {
       const r = await fetch('/api/leave', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(form),
       });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error);
-      showToast('Leave request submitted','success');
+      showToast('Leave request submitted', 'success');
       setApply(false);
-      setForm({ employee_id:'', leave_type:'annual', start_date:'', end_date:'', reason:'' });
+      setForm({ employee_id: '', leave_type: 'annual', start_date: '', end_date: '', reason: '' });
       load();
     } catch (e: unknown) {
-      showToast(e instanceof Error ? e.message : 'Failed','error');
+      showToast(e instanceof Error ? e.message : 'Failed', 'error');
     } finally { setSaving(false); }
   };
 
-  const pending  = requests.filter((r) => r.status === 'pending').length;
-  const approved = requests.filter((r) => r.status === 'approved').length;
+  const approve = async (id: string) => {
+    try {
+      const r = await fetch(`/api/leave/${id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'approve' }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error);
+      showToast('Leave approved', 'success');
+      load();
+    } catch (e: unknown) { showToast(e instanceof Error ? e.message : 'Failed', 'error'); }
+  };
+
+  const openDeny = (id: string) => { setDenyId(id); setDenyReason(''); setDenyModal(true); };
+
+  const deny = async () => {
+    if (!denyId) return;
+    setSaving(true);
+    try {
+      const r = await fetch(`/api/leave/${denyId}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'deny', denial_reason: denyReason }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error);
+      showToast('Leave denied', 'success');
+      setDenyModal(false);
+      load();
+    } catch (e: unknown) { showToast(e instanceof Error ? e.message : 'Failed', 'error'); }
+    finally { setSaving(false); }
+  };
+
+  const pending  = requests.filter(r => r.status === 'pending');
+  const approved = requests.filter(r => r.status === 'approved');
+  const totalDays = approved.reduce((s, r) => s + r.days, 0);
+  const typeLabel = (t: string) => LEAVE_TYPES.find(l => l.value === t)?.label ?? t;
 
   return (
-    <div className="flex flex-col flex-1 overflow-hidden">
-      <Topbar title="Leave Management" action={
-        <Button variant="primary" onClick={() => setApply(true)}><Plus size={14} /> Apply Leave</Button>
-      } />
+      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
+        <Topbar title="Leave Management" action={
+          <Button variant="primary" onClick={() => setApply(true)}>
+            <Plus size={14} /> New Request
+          </Button>
+        } />
 
-      <div className="flex-1 overflow-y-auto p-4 md:p-6">
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-          <StatCard label="Pending"  value={pending}  color="#d97706" icon={<Calendar size={16} />} />
-          <StatCard label="Approved" value={approved} color="#16a34a" />
-          <StatCard label="This Month" value={requests.filter((r)=>r.created_at?.startsWith(new Date().toISOString().slice(0,7))).length} color="#2563eb" />
-          <StatCard label="Total" value={requests.length} color="#94a3b8" />
-        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 24px' }}>
 
-        {/* Filter tabs */}
-        <div className="flex gap-2 mb-4">
-          {['','pending','approved','denied','cancelled'].map((s) => (
-            <button key={s} onClick={() => setFilter(s)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${filter === s ? 'bg-blue-600 text-white' : 'bg-[#1e2d42] text-slate-400 hover:text-slate-200'}`}>
-              {s || 'All'}
-            </button>
-          ))}
-        </div>
-
-        <Card>
-          {loading ? <div className="flex justify-center py-16"><Spinner size={28} /></div> :
-           requests.length === 0 ? <EmptyState message="No leave requests" icon="📅" /> : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-[#2a3a52]">
-                    {['Employee','Type','From','To','Days','Status','Actions'].map((h) => (
-                      <th key={h} className="text-left px-4 py-3 text-xs uppercase tracking-wider text-slate-500 font-mono font-normal">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {requests.map((req) => (
-                    <tr key={req.id} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
-                      <td className="px-4 py-3 text-sm font-medium text-slate-200">{req.employee_name}</td>
-                      <td className="px-4 py-3"><Badge status={req.leave_type} label={req.leave_type.replace('_',' ')} /></td>
-                      <td className="px-4 py-3 text-sm text-slate-400 font-mono">{formatDate(req.start_date)}</td>
-                      <td className="px-4 py-3 text-sm text-slate-400 font-mono">{formatDate(req.end_date)}</td>
-                      <td className="px-4 py-3 text-sm text-slate-400 font-mono">{req.days}d</td>
-                      <td className="px-4 py-3"><Badge status={req.status} /></td>
-                      <td className="px-4 py-3">
-                        {req.status === 'pending' && (
-                          <div className="flex gap-1">
-                            <button onClick={() => action(req.id,'approve')} className="p-1.5 text-green-400 hover:bg-green-900/30 rounded-lg transition-colors" title="Approve"><CheckCircle size={14} /></button>
-                            <button onClick={() => action(req.id,'deny')}    className="p-1.5 text-red-400 hover:bg-red-900/30 rounded-lg transition-colors" title="Deny"><XCircle size={14} /></button>
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Card>
-      </div>
-
-      <Modal open={applyModal} onClose={() => setApply(false)} title="Apply for Leave" maxWidth="max-w-lg">
-        <div className="space-y-3">
-          <Select label="Employee" value={form.employee_id} onChange={(e) => setForm((p) => ({ ...p, employee_id: e.target.value }))}>
-            <option value="">Select employee</option>
-            {employees.map((e) => <option key={e.id} value={e.id}>{e.first_name} {e.last_name}</option>)}
-          </Select>
-          <Select label="Leave Type" value={form.leave_type} onChange={(e) => setForm((p) => ({ ...p, leave_type: e.target.value }))}>
-            {LEAVE_TYPES.map((t) => <option key={t} value={t}>{t.replace('_',' ')}</option>)}
-          </Select>
-          <div className="grid grid-cols-2 gap-3">
-            <Input label="From" type="date" value={form.start_date} onChange={(e) => setForm((p) => ({ ...p, start_date: e.target.value }))} />
-            <Input label="To"   type="date" value={form.end_date}   onChange={(e) => setForm((p) => ({ ...p, end_date: e.target.value }))} />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 20 }}>
+            <StatCard label="Total Requests" value={requests.length}  color="#2563eb" icon={<Calendar size={16}/>} />
+            <StatCard label="Pending"        value={pending.length}   color="#d97706" icon={<Clock size={16}/>} delta={pending.length > 0 ? 'Action needed' : 'All clear'} />
+            <StatCard label="Approved"       value={approved.length}  color="#16a34a" icon={<CheckCircle size={16}/>} />
+            <StatCard label="Days Approved"  value={totalDays}        color="#7c3aed" icon={<Users size={16}/>} delta="This period" />
           </div>
-          <Textarea label="Reason (optional)" value={form.reason} onChange={(e) => setForm((p) => ({ ...p, reason: e.target.value }))} placeholder="Brief reason for leave..." />
+
+          {pending.length > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', backgroundColor: '#78350f22', border: '1px solid #92400e', borderRadius: 12, marginBottom: 16 }}>
+                <AlertCircle size={16} style={{ color: '#fbbf24', flexShrink: 0 }} />
+                <span style={{ fontSize: 13, color: '#fcd34d' }}>
+              <strong>{pending.length}</strong> leave request{pending.length > 1 ? 's' : ''} pending approval
+            </span>
+              </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 6, marginBottom: 14, backgroundColor: '#1e2d42', border: '1px solid #2a3a52', borderRadius: 10, padding: 4 }}>
+            {STATUS_TABS.map(s => (
+                <button key={s} onClick={() => setFilter(s)}
+                        style={{ flex: 1, padding: '7px 10px', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 500, transition: 'all .15s', backgroundColor: filter === s ? '#2563eb' : 'transparent', color: filter === s ? '#fff' : '#64748b' }}>
+                  {s ? s.charAt(0).toUpperCase() + s.slice(1) : 'All'}
+                </button>
+            ))}
+          </div>
+
+          <Card>
+            {loading ? (
+                <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}><Spinner size={28} /></div>
+            ) : requests.length === 0 ? (
+                <EmptyState message="No leave requests found" icon="📅" />
+            ) : (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <thead>
+                    <tr style={{ borderBottom: '1px solid #2a3a52' }}>
+                      {['Employee','Type','From','To','Days','Status','Reason','Actions'].map(h => (
+                          <th key={h} style={{ textAlign: 'left', padding: '12px 16px', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748b', fontFamily: 'monospace', fontWeight: 'normal' }}>{h}</th>
+                      ))}
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {requests.map(req => (
+                        <tr key={req.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
+                          <td style={{ padding: '12px 16px', fontSize: 13, fontWeight: 500, color: '#e2e8f0' }}>{req.employee_name}</td>
+                          <td style={{ padding: '12px 16px' }}>
+                        <span style={{ fontSize: 11, fontFamily: 'monospace', padding: '3px 8px', borderRadius: 6, backgroundColor: '#1e2d42', border: '1px solid #2a3a52', color: '#94a3b8' }}>
+                          {typeLabel(req.leave_type)}
+                        </span>
+                          </td>
+                          <td style={{ padding: '12px 16px', fontSize: 12, color: '#94a3b8', fontFamily: 'monospace' }}>{formatDate(req.start_date)}</td>
+                          <td style={{ padding: '12px 16px', fontSize: 12, color: '#94a3b8', fontFamily: 'monospace' }}>{formatDate(req.end_date)}</td>
+                          <td style={{ padding: '12px 16px', fontSize: 13, fontWeight: 600, color: '#e2e8f0', textAlign: 'center' }}>{req.days}</td>
+                          <td style={{ padding: '12px 16px' }}><Badge status={req.status} /></td>
+                          <td style={{ padding: '12px 16px', fontSize: 12, color: '#64748b', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {req.reason ?? req.denial_reason ?? '—'}
+                          </td>
+                          <td style={{ padding: '12px 16px' }}>
+                            {req.status === 'pending' && (
+                                <div style={{ display: 'flex', gap: 6 }}>
+                                  <button onClick={() => approve(req.id)}
+                                          style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 10px', borderRadius: 6, backgroundColor: '#14532d', border: '1px solid #166534', color: '#86efac', fontSize: 11, cursor: 'pointer' }}>
+                                    <CheckCircle size={11} /> Approve
+                                  </button>
+                                  <button onClick={() => openDeny(req.id)}
+                                          style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '5px 10px', borderRadius: 6, backgroundColor: '#7f1d1d22', border: '1px solid #991b1b', color: '#fca5a5', fontSize: 11, cursor: 'pointer' }}>
+                                    <XCircle size={11} /> Deny
+                                  </button>
+                                </div>
+                            )}
+                            {req.status === 'approved' && <span style={{ fontSize: 11, color: '#4ade80' }}>✓ {req.approver_name ?? 'HR'}</span>}
+                            {req.status === 'denied'   && <span style={{ fontSize: 11, color: '#f87171' }}>✗ Denied</span>}
+                          </td>
+                        </tr>
+                    ))}
+                    </tbody>
+                  </table>
+                </div>
+            )}
+          </Card>
         </div>
-        <div className="flex justify-end gap-2 mt-5 pt-4 border-t border-[#2a3a52]">
-          <Button variant="ghost" onClick={() => setApply(false)}>Cancel</Button>
-          <Button variant="primary" onClick={submit} loading={saving}>Submit Request</Button>
-        </div>
-      </Modal>
-    </div>
+
+        <Modal open={applyModal} onClose={() => setApply(false)} title="New Leave Request" maxWidth="max-w-lg">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <Select label="Employee *" value={form.employee_id} onChange={e => setForm(p => ({ ...p, employee_id: e.target.value }))}>
+              <option value="">Select employee</option>
+              {employees.map(e => <option key={e.id} value={e.id}>{e.first_name} {e.last_name}</option>)}
+            </Select>
+            <Select label="Leave Type *" value={form.leave_type} onChange={e => setForm(p => ({ ...p, leave_type: e.target.value }))}>
+              {LEAVE_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+            </Select>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <Input label="Start Date *" type="date" value={form.start_date} onChange={e => setForm(p => ({ ...p, start_date: e.target.value }))} />
+              <Input label="End Date *"   type="date" value={form.end_date}   onChange={e => setForm(p => ({ ...p, end_date: e.target.value }))} />
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <label style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748b', fontFamily: 'monospace' }}>Reason</label>
+              <textarea value={form.reason} onChange={e => setForm(p => ({ ...p, reason: e.target.value }))}
+                        placeholder="Optional reason for leave…" rows={3}
+                        style={{ backgroundColor: '#1e2d42', border: '1px solid #2a3a52', borderRadius: 8, color: '#f1f5f9', padding: '8px 12px', fontSize: 13, fontFamily: 'inherit', resize: 'vertical', outline: 'none' }} />
+            </div>
+            {form.start_date && form.end_date && form.end_date >= form.start_date && (
+                <div style={{ padding: '10px 14px', backgroundColor: '#1e3a8a22', border: '1px solid #1e40af', borderRadius: 10, fontSize: 12, color: '#93c5fd', display: 'flex', justifyContent: 'space-between' }}>
+                  <span>Working days requested</span>
+                  <strong>{Math.max(1, Math.round((new Date(form.end_date).getTime() - new Date(form.start_date).getTime()) / 86400000) + 1)} days</strong>
+                </div>
+            )}
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16, paddingTop: 14, borderTop: '1px solid #2a3a52' }}>
+            <Button variant="ghost" onClick={() => setApply(false)}>Cancel</Button>
+            <Button variant="primary" onClick={submit} loading={saving}>Submit Request</Button>
+          </div>
+        </Modal>
+
+        <Modal open={denyModal} onClose={() => setDenyModal(false)} title="Deny Leave Request" maxWidth="max-w-md">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <p style={{ fontSize: 13, color: '#94a3b8', margin: 0 }}>Provide a reason for denying this leave request. The employee will be notified by email.</p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <label style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748b', fontFamily: 'monospace' }}>Reason for Denial</label>
+              <textarea value={denyReason} onChange={e => setDenyReason(e.target.value)}
+                        placeholder="e.g. Insufficient leave balance, critical project deadline…" rows={4}
+                        style={{ backgroundColor: '#1e2d42', border: '1px solid #2a3a52', borderRadius: 8, color: '#f1f5f9', padding: '8px 12px', fontSize: 13, fontFamily: 'inherit', resize: 'vertical', outline: 'none' }} />
+            </div>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16, paddingTop: 14, borderTop: '1px solid #2a3a52' }}>
+            <Button variant="ghost" onClick={() => setDenyModal(false)}>Cancel</Button>
+            <Button variant="danger" onClick={deny} loading={saving}>Deny Request</Button>
+          </div>
+        </Modal>
+      </div>
   );
 }
