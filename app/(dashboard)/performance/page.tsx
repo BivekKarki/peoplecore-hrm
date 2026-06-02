@@ -2,33 +2,56 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { Topbar } from '@/components/layout/Topbar';
-import { Card, Button, Modal, Select, Textarea, Input, Spinner, EmptyState, StatCard, showToast } from '@/components/ui';
-import { PerformanceReview } from '@/types';
+import { Card, Button, Modal, Select, Input, Spinner, EmptyState, StatCard, showToast } from '@/components/ui';
 import { formatDate } from '@/lib/utils';
-import { Star, Plus, TrendingUp } from 'lucide-react';
+import { Star, Plus, TrendingUp, Award, Target } from 'lucide-react';
 
-const PERIODS = ['Q1-2025','Q2-2025','Q3-2025','Q4-2025','Q1-2024','Annual-2024'];
+interface Review {
+  id: string; employee_id: string; period: string;
+  rating: number; kpi_achievement: number;
+  strengths: string | null; improvements: string | null;
+  goals: string | null; comments: string | null;
+  reviewer_id: string; employee_name: string;
+  reviewer_name: string; created_at: string;
+}
 
-function StarRating({ rating }: { rating: number }) {
+const PERIODS = ['Q1-2025','Q2-2025','Q3-2025','Q4-2025','Annual-2024','Q4-2024','Q3-2024','Q2-2024'];
+const RATING_LABELS = ['','Very Poor','Below Expectations','Meets Expectations','Good','Excellent'];
+const RATING_COLORS = ['','#dc2626','#f97316','#eab308','#22c55e','#10b981'];
+
+function StarRating({ rating, onChange }: { rating: number; onChange?: (r: number) => void }) {
+  const [hover, setHover] = useState(0);
   return (
-    <div className="flex gap-0.5">
-      {[1,2,3,4,5].map(i=>(
-        <Star key={i} size={13} className={i<=rating ? 'text-amber-400 fill-amber-400' : 'text-slate-600'}/>
-      ))}
-    </div>
+      <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+        {[1,2,3,4,5].map(i => (
+            <button key={i}
+                    onClick={() => onChange?.(i)}
+                    onMouseEnter={() => onChange && setHover(i)}
+                    onMouseLeave={() => onChange && setHover(0)}
+                    style={{ background: 'none', border: 'none', cursor: onChange ? 'pointer' : 'default', padding: 0, display: 'flex' }}>
+              <Star size={18} style={{ color: i <= (hover || rating) ? '#fbbf24' : '#334155', fill: i <= (hover || rating) ? '#fbbf24' : 'none' }} />
+            </button>
+        ))}
+        {rating > 0 && (
+            <span style={{ fontSize: 11, color: RATING_COLORS[rating], fontWeight: 600, marginLeft: 4 }}>
+          {RATING_LABELS[rating]}
+        </span>
+        )}
+      </div>
   );
 }
 
 export default function PerformancePage() {
-  const [reviews, setReviews]   = useState<PerformanceReview[]>([]);
+  const [reviews, setReviews]   = useState<Review[]>([]);
   const [loading, setLoading]   = useState(true);
   const [modal, setModal]       = useState(false);
   const [saving, setSaving]     = useState(false);
-  const [employees, setEmps]    = useState<{id:string;first_name:string;last_name:string}[]>([]);
+  const [employees, setEmps]    = useState<{ id: string; first_name: string; last_name: string }[]>([]);
+  const [selected, setSelected] = useState<Review | null>(null);
   const [form, setForm]         = useState({
-    employee_id:'', review_period:'Q1-2025', rating:3,
-    kpi_achievement:80, goals_met:80, comments:'',
-    strengths:'', improvements:'', next_review_date:'', salary_adjustment:'',
+    employee_id: '', period: 'Q2-2025',
+    rating: 0, kpi_achievement: 100,
+    strengths: '', improvements: '', goals: '', comments: '',
   });
 
   const load = useCallback(async () => {
@@ -37,122 +60,175 @@ export default function PerformancePage() {
       const r = await fetch('/api/performance');
       const j = await r.json();
       setReviews(j.data ?? []);
-    } catch { showToast('Failed to load reviews','error'); }
+    } catch { showToast('Failed to load reviews', 'error'); }
     finally { setLoading(false); }
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
-    fetch('/api/employees?limit=200&status=active')
-      .then(r=>r.json())
-      .then(j=>setEmps(j.data ?? []));
+    fetch('/api/employees?limit=200')
+        .then(r => r.json())
+        .then(j => setEmps(j.data ?? []));
   }, []);
 
   const submit = async () => {
-    if (!form.employee_id) { showToast('Select employee','error'); return; }
-    if (!form.comments.trim()) { showToast('Comments required','error'); return; }
+    if (!form.employee_id) { showToast('Select an employee', 'error'); return; }
+    if (!form.rating)      { showToast('Select a rating', 'error'); return; }
     setSaving(true);
     try {
-      const r = await fetch('/api/performance',{
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({...form, rating:Number(form.rating), kpi_achievement:Number(form.kpi_achievement), goals_met:Number(form.goals_met)}),
+      const r = await fetch('/api/performance', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
       });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error);
-      showToast('Review submitted','success');
+      showToast('Review submitted', 'success');
       setModal(false);
+      setForm({ employee_id: '', period: 'Q2-2025', rating: 0, kpi_achievement: 100, strengths: '', improvements: '', goals: '', comments: '' });
       load();
-    } catch (e:unknown) {
-      showToast(e instanceof Error ? e.message : 'Failed','error');
+    } catch (e: unknown) {
+      showToast(e instanceof Error ? e.message : 'Failed', 'error');
     } finally { setSaving(false); }
   };
 
-  const avgRating  = reviews.length ? (reviews.reduce((s,r)=>s+r.rating,0)/reviews.length).toFixed(1) : '—';
-  const avgKpi     = reviews.length ? Math.round(reviews.reduce((s,r)=>s+r.kpi_achievement,0)/reviews.length) : 0;
-  const top        = reviews.filter(r=>r.rating>=4).length;
+  const avgRating = reviews.length ? (reviews.reduce((s,r) => s + r.rating, 0) / reviews.length).toFixed(1) : '—';
+  const avgKPI    = reviews.length ? Math.round(reviews.reduce((s,r) => s + r.kpi_achievement, 0) / reviews.length) : 0;
+  const topPerformers = reviews.filter(r => r.rating >= 4).length;
+  const needsSupport  = reviews.filter(r => r.rating <= 2).length;
 
   return (
-    <div className="flex flex-col flex-1 overflow-hidden">
-      <Topbar title="Performance" action={
-        <Button variant="primary" onClick={()=>setModal(true)}><Plus size={14}/> Add Review</Button>
-      }/>
+      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
+        <Topbar title="Performance Reviews" action={
+          <Button variant="primary" onClick={() => { setSelected(null); setModal(true); }}>
+            <Plus size={14} /> New Review
+          </Button>
+        } />
 
-      <div className="flex-1 overflow-y-auto p-4 md:p-6">
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-          <StatCard label="Total Reviews"   value={reviews.length} color="#2563eb" icon={<Star size={16}/>}/>
-          <StatCard label="Avg Rating"      value={avgRating}      color="#d97706"/>
-          <StatCard label="Avg KPI %"       value={`${avgKpi}%`}   color="#16a34a" icon={<TrendingUp size={16}/>}/>
-          <StatCard label="High Performers" value={top}            color="#7c3aed"/>
-        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 24px' }}>
 
-        <Card>
-          {loading ? <div className="flex justify-center py-16"><Spinner size={24}/></div> :
-           reviews.length===0 ? <EmptyState message="No performance reviews yet" icon="⭐"/> : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-[#2a3a52]">
-                    {['Employee','Period','Rating','KPI %','Goals %','Reviewer','Date','Comments'].map(h=>(
-                      <th key={h} className="text-left px-4 py-3 text-xs uppercase tracking-wider text-slate-500 font-mono font-normal">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {reviews.map(rev=>(
-                    <tr key={rev.id} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
-                      <td className="px-4 py-3 text-sm font-medium text-slate-200">{rev.employee_name}</td>
-                      <td className="px-4 py-3 text-xs text-slate-400 font-mono">{rev.review_period}</td>
-                      <td className="px-4 py-3"><StarRating rating={rev.rating}/></td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-2">
-                          <div className="w-16 h-1.5 bg-[#2a3a52] rounded-full">
-                            <div className="h-1.5 rounded-full bg-blue-500" style={{width:`${Math.min(rev.kpi_achievement,100)}%`}}/>
-                          </div>
-                          <span className="text-xs font-mono text-slate-400">{rev.kpi_achievement}%</span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-xs text-slate-400 font-mono">{rev.goals_met}%</td>
-                      <td className="px-4 py-3 text-xs text-slate-500">{rev.reviewer_name}</td>
-                      <td className="px-4 py-3 text-xs text-slate-500">{formatDate(rev.created_at)}</td>
-                      <td className="px-4 py-3 text-xs text-slate-400 max-w-[200px] truncate">{rev.comments}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Card>
-      </div>
-
-      <Modal open={modal} onClose={()=>setModal(false)} title="Add Performance Review">
-        <div className="grid grid-cols-2 gap-3">
-          <Select label="Employee" value={form.employee_id} onChange={e=>setForm(p=>({...p,employee_id:e.target.value}))}>
-            <option value="">Select employee</option>
-            {employees.map(e=><option key={e.id} value={e.id}>{e.first_name} {e.last_name}</option>)}
-          </Select>
-          <Select label="Review Period" value={form.review_period} onChange={e=>setForm(p=>({...p,review_period:e.target.value}))}>
-            {PERIODS.map(p=><option key={p}>{p}</option>)}
-          </Select>
-          <Select label="Overall Rating (1–5)" value={String(form.rating)} onChange={e=>setForm(p=>({...p,rating:Number(e.target.value)}))}>
-            {[1,2,3,4,5].map(n=><option key={n} value={n}>{n} — {['Very Poor','Poor','Meets Expectations','Good','Excellent'][n-1]}</option>)}
-          </Select>
-          <Input label="KPI Achievement %" type="number" min={0} max={200} value={form.kpi_achievement} onChange={e=>setForm(p=>({...p,kpi_achievement:Number(e.target.value)}))}/>
-          <Input label="Goals Met %" type="number" min={0} max={100} value={form.goals_met} onChange={e=>setForm(p=>({...p,goals_met:Number(e.target.value)}))}/>
-          <Input label="Salary Adjustment %" type="number" value={form.salary_adjustment} onChange={e=>setForm(p=>({...p,salary_adjustment:e.target.value}))} placeholder="e.g. 5"/>
-          <div className="col-span-2">
-            <Textarea label="Overall Comments *" value={form.comments} onChange={e=>setForm(p=>({...p,comments:e.target.value}))} placeholder="Summary of performance, achievements…"/>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 20 }}>
+            <StatCard label="Total Reviews"  value={reviews.length} color="#2563eb" icon={<Award size={16}/>} />
+            <StatCard label="Avg Rating"     value={avgRating}      color="#d97706" icon={<Star size={16}/>} delta="out of 5.0" />
+            <StatCard label="Avg KPI"        value={`${avgKPI}%`}   color="#16a34a" icon={<Target size={16}/>} />
+            <StatCard label="Top Performers" value={topPerformers}  color="#7c3aed" icon={<TrendingUp size={16}/>} delta={needsSupport > 0 ? `${needsSupport} need support` : 'All on track'} />
           </div>
-          <Textarea label="Strengths" value={form.strengths} onChange={e=>setForm(p=>({...p,strengths:e.target.value}))} placeholder="Key strengths observed…"/>
-          <Textarea label="Areas for Improvement" value={form.improvements} onChange={e=>setForm(p=>({...p,improvements:e.target.value}))} placeholder="Areas to develop…"/>
-          <Input label="Next Review Date" type="date" value={form.next_review_date} onChange={e=>setForm(p=>({...p,next_review_date:e.target.value}))}/>
+
+          {loading ? (
+              <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}><Spinner size={28} /></div>
+          ) : reviews.length === 0 ? (
+              <EmptyState message="No performance reviews yet" icon="⭐" />
+          ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(340px,1fr))', gap: 14 }}>
+                {reviews.map(rev => (
+                    <div key={rev.id} onClick={() => setSelected(rev)}
+                         style={{ backgroundColor: '#162030', border: `1px solid ${selected?.id === rev.id ? '#2563eb' : '#2a3a52'}`, borderRadius: 14, padding: 18, cursor: 'pointer', transition: 'border-color .2s' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+                        <div>
+                          <div style={{ fontSize: 14, fontWeight: 600, color: '#f1f5f9' }}>{rev.employee_name}</div>
+                          <div style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace', marginTop: 2 }}>{rev.period}</div>
+                        </div>
+                        <div style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, backgroundColor: `${RATING_COLORS[rev.rating]}22`, border: `1px solid ${RATING_COLORS[rev.rating]}66`, color: RATING_COLORS[rev.rating], fontWeight: 600 }}>
+                          {RATING_LABELS[rev.rating]}
+                        </div>
+                      </div>
+                      <StarRating rating={rev.rating} />
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 }}>
+                        <div style={{ backgroundColor: '#1e2d42', borderRadius: 8, padding: '8px 12px', textAlign: 'center' }}>
+                          <div style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace', textTransform: 'uppercase', marginBottom: 3 }}>KPI</div>
+                          <div style={{ fontSize: 18, fontWeight: 700, color: rev.kpi_achievement >= 90 ? '#4ade80' : rev.kpi_achievement >= 70 ? '#fbbf24' : '#f87171', fontFamily: 'monospace' }}>{rev.kpi_achievement}%</div>
+                        </div>
+                        <div style={{ backgroundColor: '#1e2d42', borderRadius: 8, padding: '8px 12px', textAlign: 'center' }}>
+                          <div style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace', textTransform: 'uppercase', marginBottom: 3 }}>Reviewer</div>
+                          <div style={{ fontSize: 12, color: '#94a3b8', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{rev.reviewer_name}</div>
+                        </div>
+                      </div>
+                      {rev.comments && (
+                          <div style={{ marginTop: 10, fontSize: 12, color: '#64748b', lineHeight: 1.5, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>{rev.comments}</div>
+                      )}
+                      <div style={{ marginTop: 10, fontSize: 10, color: '#334155', fontFamily: 'monospace' }}>{formatDate(rev.created_at)}</div>
+                    </div>
+                ))}
+              </div>
+          )}
+
+          {selected && (
+              <div style={{ marginTop: 16, backgroundColor: '#162030', border: '1px solid #2563eb', borderRadius: 14, padding: 20 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                  <div>
+                    <div style={{ fontSize: 16, fontWeight: 600, color: '#f1f5f9' }}>{selected.employee_name} — {selected.period}</div>
+                    <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>Reviewed by {selected.reviewer_name} on {formatDate(selected.created_at)}</div>
+                  </div>
+                  <button onClick={() => setSelected(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', fontSize: 18 }}>✕</button>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12 }}>
+                  {[
+                    { label: '💪 Strengths',         content: selected.strengths },
+                    { label: '🎯 Areas to Improve',  content: selected.improvements },
+                    { label: '📋 Goals',             content: selected.goals },
+                  ].map(s => s.content && (
+                      <div key={s.label} style={{ backgroundColor: '#1e2d42', borderRadius: 10, padding: 14 }}>
+                        <div style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace', marginBottom: 8 }}>{s.label}</div>
+                        <div style={{ fontSize: 13, color: '#e2e8f0', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{s.content}</div>
+                      </div>
+                  ))}
+                </div>
+                {selected.comments && (
+                    <div style={{ marginTop: 12, backgroundColor: '#1e2d42', borderRadius: 10, padding: 14 }}>
+                      <div style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace', marginBottom: 8 }}>💬 Comments</div>
+                      <div style={{ fontSize: 13, color: '#e2e8f0', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{selected.comments}</div>
+                    </div>
+                )}
+              </div>
+          )}
         </div>
-        <div className="flex justify-end gap-2 mt-5 pt-4 border-t border-[#2a3a52]">
-          <Button variant="ghost" onClick={()=>setModal(false)}>Cancel</Button>
-          <Button variant="primary" onClick={submit} loading={saving}>Submit Review</Button>
-        </div>
-      </Modal>
-    </div>
+
+        <Modal open={modal} onClose={() => setModal(false)} title="New Performance Review" maxWidth="max-w-lg">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <Select label="Employee *" value={form.employee_id} onChange={e => setForm(p => ({ ...p, employee_id: e.target.value }))}>
+                <option value="">Select employee</option>
+                {employees.map(e => <option key={e.id} value={e.id}>{e.first_name} {e.last_name}</option>)}
+              </Select>
+              <Select label="Review Period *" value={form.period} onChange={e => setForm(p => ({ ...p, period: e.target.value }))}>
+                {PERIODS.map(p => <option key={p}>{p}</option>)}
+              </Select>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <label style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748b', fontFamily: 'monospace' }}>Rating *</label>
+              <div style={{ padding: '10px 14px', backgroundColor: '#1e2d42', border: '1px solid #2a3a52', borderRadius: 8 }}>
+                <StarRating rating={form.rating} onChange={r => setForm(p => ({ ...p, rating: r }))} />
+              </div>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <label style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748b', fontFamily: 'monospace' }}>KPI Achievement: {form.kpi_achievement}%</label>
+              <input type="range" min={0} max={150} value={form.kpi_achievement}
+                     onChange={e => setForm(p => ({ ...p, kpi_achievement: parseInt(e.target.value) }))}
+                     style={{ accentColor: '#2563eb' }} />
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#64748b', fontFamily: 'monospace' }}>
+                <span>0%</span><span>75%</span><span>100%</span><span>150%</span>
+              </div>
+            </div>
+            {[
+              { key: 'strengths',    label: 'Strengths',            placeholder: 'Key achievements and strengths…' },
+              { key: 'improvements', label: 'Areas to Improve',     placeholder: 'Areas needing development…' },
+              { key: 'goals',        label: 'Goals for Next Period', placeholder: 'Target outcomes and goals…' },
+              { key: 'comments',     label: 'General Comments',     placeholder: 'Overall review comments…' },
+            ].map(f => (
+                <div key={f.key} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <label style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748b', fontFamily: 'monospace' }}>{f.label}</label>
+                  <textarea value={(form as Record<string,unknown>)[f.key] as string}
+                            onChange={e => setForm(p => ({ ...p, [f.key]: e.target.value }))}
+                            placeholder={f.placeholder} rows={2}
+                            style={{ backgroundColor: '#1e2d42', border: '1px solid #2a3a52', borderRadius: 8, color: '#f1f5f9', padding: '8px 12px', fontSize: 13, fontFamily: 'inherit', resize: 'vertical', outline: 'none' }} />
+                </div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16, paddingTop: 14, borderTop: '1px solid #2a3a52' }}>
+            <Button variant="ghost" onClick={() => setModal(false)}>Cancel</Button>
+            <Button variant="primary" onClick={submit} loading={saving}>Submit Review</Button>
+          </div>
+        </Modal>
+      </div>
   );
 }
