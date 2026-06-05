@@ -330,10 +330,20 @@ export default function KioskPage() {
                   : faceVisible ? '#16a34a' : '#2a3a52';
 
   return (
-      <div style={{ minHeight: '100vh', backgroundColor: '#0a0f1a', display: 'flex', flexDirection: 'column', fontFamily: "'DM Sans', system-ui, sans-serif", userSelect: 'none' }}>
-
+      <div
+          style={{
+            minHeight: '100dvh',
+            height: '100dvh',
+            overflowY: 'auto',
+            backgroundColor: '#0a0f1a',
+            display: 'flex',
+            flexDirection: 'column',
+            fontFamily: "'DM Sans', system-ui, sans-serif",
+            userSelect: 'none',
+          }}
+      >
         {/* Header */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 24px', backgroundColor: '#0f1724', borderBottom: '1px solid #1e2d42' }}>
+        <div className="kiosk-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 24px', backgroundColor: '#0f1724', borderBottom: '1px solid #1e2d42' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <div style={{ width: 32, height: 32, backgroundColor: '#2563eb', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: 16 }}>P</div>
             <div>
@@ -342,8 +352,8 @@ export default function KioskPage() {
             </div>
           </div>
           <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 22, fontWeight: 700, color: '#f1f5f9', fontFamily: 'monospace', letterSpacing: '0.05em' }}>{time}</div>
-            <div style={{ fontSize: 11, color: '#64748b' }}>{date}</div>
+            <div className="kiosk-clock" style={{ fontSize: 22, fontWeight: 700, color: '#f1f5f9', fontFamily: 'monospace', letterSpacing: '0.05em' }}>{time}</div>
+            <div className="kiosk-date" style={{ fontSize: 11, color: '#64748b' }}>{date}</div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontFamily: 'monospace' }}>
             {online
@@ -354,10 +364,10 @@ export default function KioskPage() {
         </div>
 
         {/* Body */}
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, gap: 32 }}>
+        <div className="kiosk-body">
 
           {/* Camera panel */}
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, width: 480, flexShrink: 0 }}>
+          <div className="kiosk-camera-panel">
             <div style={{ position: 'relative', width: '100%', borderRadius: 16, overflow: 'hidden', backgroundColor: '#000', border: `2px solid ${borderColor}`, aspectRatio: '4/3', transition: 'border-color .3s' }}>
               <video ref={videoRef} autoPlay muted playsInline style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
               <canvas ref={canvasRef} style={{ display: 'none' }} />
@@ -490,7 +500,7 @@ export default function KioskPage() {
           </div>
 
           {/* Info panel */}
-          <div style={{ width: 360, display: 'flex', flexDirection: 'column', gap: 12, flexShrink: 0 }}>
+          <div className="kiosk-info-panel">
 
             {/* Idle */}
             {state === 'idle' && (
@@ -687,9 +697,110 @@ export default function KioskPage() {
         </div>
 
         <style>{`
-        @keyframes scanMove { 0% { top: 10%; } 100% { top: 90%; } }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-      `}</style>
+  @keyframes scanMove { 0% { top: 10%; } 100% { top: 90%; } }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+  .kiosk-body {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    gap: 32px;
+    overflow-y: auto;
+  }
+
+  .kiosk-camera-panel {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    width: min(480px, 100%);
+    flex-shrink: 0;
+  }
+
+  .kiosk-info-panel {
+    width: min(360px, 100%);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+
+  @media (max-width: 900px) {
+    .kiosk-body {
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 16px;
+      gap: 16px;
+      overflow-y: visible;
+    }
+
+    .kiosk-camera-panel,
+    .kiosk-info-panel {
+      width: 100%;
+      max-width: 480px;
+    }
+  }
+
+  @media (max-width: 500px) {
+    .kiosk-body {
+      padding: 12px;
+      gap: 12px;
+    }
+
+    .kiosk-header {
+      padding: 10px 14px !important;
+    }
+
+    .kiosk-header .kiosk-clock {
+      font-size: 18px !important;
+    }
+
+    .kiosk-header .kiosk-date {
+      font-size: 9px !important;
+    }
+  }
+
+  /* Phone landscape fix */
+  @media (max-height: 500px) and (orientation: landscape) {
+    .kiosk-body {
+      flex-direction: row;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 10px;
+      gap: 12px;
+      overflow-y: visible;
+    }
+
+    .kiosk-camera-panel {
+      width: min(42vw, 360px);
+      gap: 8px;
+    }
+
+    .kiosk-info-panel {
+      width: min(42vw, 340px);
+    }
+
+    .kiosk-header {
+      padding: 6px 14px !important;
+    }
+
+    .kiosk-header .kiosk-clock {
+      font-size: 16px !important;
+    }
+
+    .kiosk-header .kiosk-date {
+      display: none;
+    }
+
+    .kiosk-camera-panel button {
+      padding: 10px 14px !important;
+      font-size: 13px !important;
+    }
+  }
+`}</style>
       </div>
   );
 }
