@@ -1,42 +1,89 @@
 // AI Service — uses Claude claude-sonnet-4-20250514 for HR intelligence
 // All AI calls are server-side only
 
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const MODEL = 'claude-sonnet-4-20250514';
+// const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+// const MODEL = 'claude-sonnet-4-20250514';
+//
+// interface Message { role: 'user' | 'assistant'; content: string; }
+//
+// async function callClaude(
+//   systemPrompt: string,
+//   messages: Message[],
+//   maxTokens = 1000
+// ): Promise<string> {
+//   if (!ANTHROPIC_API_KEY) {
+//     throw new Error('ANTHROPIC_API_KEY not configured');
+//   }
+//
+//   const res = await fetch('https://api.anthropic.com/v1/messages', {
+//     method: 'POST',
+//     headers: {
+//       'Content-Type': 'application/json',
+//       'x-api-key': ANTHROPIC_API_KEY,
+//       'anthropic-version': '2023-06-01',
+//     },
+//     body: JSON.stringify({
+//       model: MODEL,
+//       max_tokens: maxTokens,
+//       system: systemPrompt,
+//       messages,
+//     }),
+//   });
+//
+//   if (!res.ok) {
+//     const err = await res.json().catch(() => ({}));
+//     throw new Error(`Claude API error: ${res.status} — ${JSON.stringify(err)}`);
+//   }
+//
+//   const data = await res.json();
+//   return data.content?.[0]?.text ?? '';
+// }
 
-interface Message { role: 'user' | 'assistant'; content: string; }
 
-async function callClaude(
-  systemPrompt: string,
-  messages: Message[],
-  maxTokens = 1000
+// AI Service — uses Google Gemini API for HR intelligence
+// Get a free API key at: https://aistudio.google.com/app/apikey
+
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
+
+interface Message { role: 'user' | 'model'; content: string; }
+
+async function callGemini(
+    systemPrompt: string,
+    messages: Message[],
+    maxTokens = 1000
 ): Promise<string> {
-  if (!ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY not configured');
+  if (!GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY not configured. Get a free key at https://aistudio.google.com/app/apikey');
   }
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+  const contents = messages.map(m => ({
+    role: m.role,
+    parts: [{ text: m.content }],
+  }));
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+
+  const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: MODEL,
-      max_tokens: maxTokens,
-      system: systemPrompt,
-      messages,
+      contents,
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      generationConfig: {
+        maxOutputTokens: maxTokens,
+        temperature: 0.7,
+      },
     }),
   });
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(`Claude API error: ${res.status} — ${JSON.stringify(err)}`);
+    throw new Error(`Gemini API error: ${res.status} — ${JSON.stringify(err)}`);
   }
 
   const data = await res.json();
-  return data.content?.[0]?.text ?? '';
+  return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 }
 
 // ── 1. Attrition Risk Prediction ─────────────────────────────────────────────
@@ -75,10 +122,10 @@ Return ONLY the JSON array, no other text.`;
   const userMsg = `Analyse these ${employees.length} employees for attrition risk:\n${JSON.stringify(employees, null, 2)}`;
 
   try {
-    const raw = await callClaude(system, [{ role: 'user', content: userMsg }], 2000);
+    const raw = await callGemini(system, [{ role: 'user', content: userMsg }], 2000);
     const clean = raw.replace(/```json|```/g, '').trim();
     const results = JSON.parse(clean) as AttritionResult[];
-    return results.filter(r => r.employee_id && typeof r.risk_score === 'number');
+    return results.filter(r => r.employee_id && true);
   } catch (err) {
     console.error('[AI Attrition]', err);
     // Fallback: rule-based scoring
@@ -130,7 +177,7 @@ Each item: employee_id, employee_name, anomaly_type, description (1 sentence), s
 Only flag genuine anomalies, not normal variation. Return empty array [] if nothing notable.`;
 
   try {
-    const raw = await callClaude(system, [{
+    const raw = await callGemini(system, [{
       role: 'user',
       content: `Detect anomalies in this attendance data:\n${JSON.stringify(data, null, 2)}`,
     }], 1500);
@@ -183,9 +230,12 @@ Current system context:
 Be concise, professional and helpful. For legal advice, recommend consulting a lawyer.
 If asked about specific employees, explain you need them to use the system UI for privacy.
 Format responses clearly with bullet points when listing multiple items.`;
-
+  const geminiMessages: Message[] = messages.map(m => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    content: m.content,
+  }));
   try {
-    return await callClaude(system, messages, 800);
+    return await callGemini(system, geminiMessages, 800);
   } catch (err) {
     console.error('[AI Chatbot]', err);
     return "I'm having trouble connecting to the AI service. Please ensure ANTHROPIC_API_KEY is configured correctly in your .env.local file.";
@@ -211,7 +261,7 @@ export async function generatePerformanceInsights(reviews: {
 Return: { team_summary (2 sentences), top_performers (string array of names), needs_support (string array), recommended_actions (string array max 4), team_morale_indicator ("positive"|"neutral"|"concerning") }`;
 
   try {
-    const raw = await callClaude(system, [{
+    const raw = await callGemini(system, [{
       role: 'user',
       content: `Analyse these performance reviews:\n${JSON.stringify(reviews, null, 2)}`,
     }], 1000);
@@ -249,7 +299,7 @@ ${opts.salary_range ? `Salary: ${opts.salary_range}` : ''}
 ${opts.key_responsibilities ? `Key focus areas: ${opts.key_responsibilities}` : ''}`;
 
   try {
-    return await callClaude(system, [{ role: 'user', content: prompt }], 800);
+    return await callGemini(system, [{ role: 'user', content: prompt }], 800);
   } catch {
     return `# ${opts.job_title}\n\nJob description generation requires ANTHROPIC_API_KEY to be configured.`;
   }
@@ -270,7 +320,7 @@ unusual salary changes vs previous period, negative values, or mathematical inco
 Return ONLY JSON: { anomalies: string[], risk_flags: string[] }`;
 
   try {
-    const raw = await callClaude(system, [{
+    const raw = await callGemini(system, [{
       role: 'user',
       content: `Audit these payslips:\n${JSON.stringify(payslips, null, 2)}`,
     }], 600);
