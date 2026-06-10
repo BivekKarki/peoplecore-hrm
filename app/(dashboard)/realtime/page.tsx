@@ -13,10 +13,21 @@ interface RealtimeStats {
 interface RecentCheckin {
   employee_name: string; check_in: string; avatar_color: string;
 }
+interface ActiveEmployee {
+  employee_id: string;
+  employee_name: string;
+  department: string;
+  job_title: string;
+  avatar_color: string;
+  check_in: string;
+  method: string;
+  minutes_active: number;
+}
 
 interface SSEPayload {
   stats: RealtimeStats;
   recent_checkins: RecentCheckin[];
+  currently_active: ActiveEmployee[];
   timestamp: string;
 }
 
@@ -24,6 +35,7 @@ export default function RealtimePage() {
   const [connected, setConnected]     = useState(false);
   const [stats, setStats]             = useState<RealtimeStats | null>(null);
   const [recent, setRecent]           = useState<RecentCheckin[]>([]);
+  const [active, setActive]           = useState<ActiveEmployee[]>([]);
   const [lastUpdate, setLastUpdate]   = useState<string>('');
   const [pulses, setPulses]           = useState<{ id: number; name: string }[]>([]);
   const [time, setTime]               = useState('');
@@ -63,6 +75,7 @@ export default function RealtimePage() {
         }
 
         setRecent(payload.recent_checkins);
+        setActive(payload.currently_active ?? []);
         setConnected(true);
       });
 
@@ -76,7 +89,7 @@ export default function RealtimePage() {
 
     connect();
     return () => { esRef.current?.close(); };
-  }, []);
+  }, [recent]);
 
   const attendanceRate = stats && stats.total_active > 0
     ? Math.round((stats.present / stats.total_active) * 100)
@@ -153,7 +166,7 @@ export default function RealtimePage() {
 
           {/* Breakdown bars */}
           <Card className="p-4">
-            <div className="text-xs font-semibold text-slate-300 mb-4">Today's Breakdown</div>
+            <div className="text-xs font-semibold text-slate-300 mb-4">Today&#39;s Breakdown</div>
             {stats ? (
               <div className="space-y-3">
                 {[
@@ -222,6 +235,121 @@ export default function RealtimePage() {
             </div>
           </Card>
         </div>
+
+        {/* ── Currently On Shift ─────────────────────────────────── */}
+        <div style={{ marginTop: 24 }}>
+          <Card className="p-4">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: '#e2e8f0' }}>
+                  🟢 Currently On Shift
+                </div>
+                <div style={{ fontSize: 11, fontFamily: 'monospace', padding: '2px 8px', backgroundColor: '#14532d22', border: '1px solid #166534', borderRadius: 12, color: '#86efac' }}>
+                  {active.length} active
+                </div>
+                {connected && (
+                    <span style={{ width: 6, height: 6, backgroundColor: '#4ade80', borderRadius: '50%', animation: 'pulse 2s ease-in-out infinite' }} />
+                )}
+              </div>
+              <div style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>
+                Live · clocked in, not yet out
+              </div>
+            </div>
+
+            {active.length === 0 ? (
+                <div style={{ padding: 40, textAlign: 'center', color: '#475569', fontSize: 13 }}>
+                  No employees currently on shift
+                </div>
+            ) : (
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+                  gap: 10,
+                }}>
+                  {active.map(emp => {
+                    const initials = emp.employee_name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase();
+                    const hours = Math.floor(emp.minutes_active / 60);
+                    const mins  = emp.minutes_active % 60;
+                    const duration = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+
+                    // Color by method
+                    const methodMeta = {
+                      kiosk:  { icon: '📷', label: 'Kiosk',  color: '#4ade80' },
+                      facial: { icon: '👤', label: 'Facial', color: '#60a5fa' },
+                      manual: { icon: '✋', label: 'Manual', color: '#94a3b8' },
+                    }[emp.method] ?? { icon: '🟢', label: emp.method, color: '#94a3b8' };
+
+                    // Long-shift warning (>8h)
+                    const longShift = emp.minutes_active > 480;
+
+                    return (
+                        <div key={emp.employee_id} style={{
+                          backgroundColor: '#1e2d42',
+                          border: `1px solid ${longShift ? '#92400e' : '#2a3a52'}`,
+                          borderRadius: 10,
+                          padding: 12,
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 10,
+                        }}>
+                          {/* Avatar with live ring */}
+                          <div style={{ position: 'relative', flexShrink: 0 }}>
+                            <div style={{
+                              width: 38, height: 38, borderRadius: '50%',
+                              backgroundColor: `${emp.avatar_color}33`,
+                              color: emp.avatar_color,
+                              display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              fontSize: 12, fontWeight: 700,
+                              border: `2px solid ${emp.avatar_color}`,
+                            }}>{initials}</div>
+                            <div style={{
+                              position: 'absolute', bottom: -2, right: -2,
+                              width: 12, height: 12, borderRadius: '50%',
+                              backgroundColor: '#16a34a',
+                              border: '2px solid #1e2d42',
+                              animation: 'pulse 2s ease-in-out infinite',
+                            }} />
+                          </div>
+
+                          {/* Info */}
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: '#e2e8f0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {emp.employee_name}
+                            </div>
+                            <div style={{ fontSize: 10, color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {emp.job_title} · {emp.department}
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, fontSize: 10, fontFamily: 'monospace', color: '#475569' }}>
+                              <span style={{ color: methodMeta.color }}>{methodMeta.icon} {methodMeta.label}</span>
+                              <span>·</span>
+                              <span>In at {new Date(emp.check_in).toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' })}</span>
+                            </div>
+                          </div>
+
+                          {/* Duration */}
+                          <div style={{ flexShrink: 0, textAlign: 'right' }}>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: longShift ? '#fbbf24' : '#4ade80', fontFamily: 'monospace' }}>
+                              {duration}
+                            </div>
+                            <div style={{ fontSize: 9, color: '#475569', fontFamily: 'monospace', textTransform: 'uppercase' }}>
+                              {longShift ? '⚠ Long shift' : 'On shift'}
+                            </div>
+                          </div>
+                        </div>
+                    );
+                  })}
+                </div>
+            )}
+          </Card>
+        </div>
+
+        <style>{`
+          @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50%      { opacity: 0.4; }
+          }
+        `}</style>
+
       </div>
     </div>
   );

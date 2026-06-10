@@ -14,7 +14,7 @@ interface AttendanceRecord {
 }
 
 const STATUSES = ['present','absent','late','half_day','work_from_home'];
-const METHODS  = ['manual','kiosk','facial'];
+// const METHODS  = ['manual','kiosk','facial'];
 
 export default function AttendancePage() {
   const [records, setRecords]   = useState<AttendanceRecord[]>([]);
@@ -25,8 +25,8 @@ export default function AttendancePage() {
   const [employees, setEmps]    = useState<{ id: string; first_name: string; last_name: string; department: string }[]>([]);
   const [form, setForm]         = useState({
     employee_id: '', date: new Date().toISOString().split('T')[0],
-    check_in: '09:00', check_out: '17:00',
-    status: 'present', method: 'manual', notes: '',
+    check_in: '09:00', check_out: '',
+    status: 'present', notes: '',
   });
 
   const load = useCallback(async () => {
@@ -60,8 +60,8 @@ export default function AttendancePage() {
       if (!r.ok) throw new Error(j.error);
       showToast('Attendance recorded', 'success');
       setModal(false);
-      setForm({ employee_id: '', date, check_in: '09:00', check_out: '17:00', status: 'present', method: 'manual', notes: '' });
-      load();
+      setForm({ employee_id: '', date, check_in: '09:00', check_out: '', status: 'present', notes: '' });
+      await load();
     } catch (e: unknown) {
       showToast(e instanceof Error ? e.message : 'Failed', 'error');
     } finally { setSaving(false); }
@@ -145,9 +145,12 @@ export default function AttendancePage() {
                     <tbody>
                     {records.map(rec => {
                       let hours = '—';
+                      let openShift = false;
                       if (rec.check_in && rec.check_out) {
                         const diff = (new Date(rec.check_out).getTime() - new Date(rec.check_in).getTime()) / 3600000;
                         if (diff > 0) hours = `${diff.toFixed(1)}h`;
+                      } else if (rec.check_in && !rec.check_out) {
+                        openShift = true;
                       }
                       return (
                           <tr key={rec.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
@@ -160,9 +163,20 @@ export default function AttendancePage() {
                               </div>
                             </td>
                             <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', color: '#4ade80' }}>{fmtTime(rec.check_in)}</td>
-                            <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', color: '#f87171' }}>{fmtTime(rec.check_out)}</td>
+                            <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', color: rec.check_out ? '#f87171' : '#475569' }}>
+                              {rec.check_out ? fmtTime(rec.check_out) : '⏳ pending'}
+                            </td>
                             <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', color: '#e2e8f0', fontWeight: 600 }}>{hours}</td>
-                            <td style={{ padding: '11px 16px', fontSize: 11, fontFamily: 'monospace', color: '#64748b' }}>{rec.method}</td>
+                            <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', fontWeight: 600 }}>
+                              {openShift ? (
+                                  <span style={{ color: '#fbbf24', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                      <span style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: '#fbbf24', animation: 'pulse 2s ease-in-out infinite' }} />
+                                      Open
+                                    </span>
+                              ) : (
+                                  <span style={{ color: '#e2e8f0' }}>{hours}</span>
+                              )}
+                            </td>
                             <td style={{ padding: '11px 16px', fontSize: 12, color: '#64748b' }}>{rec.notes ?? '—'}</td>
                           </tr>
                       );
@@ -185,12 +199,22 @@ export default function AttendancePage() {
               <Select label="Status *" value={form.status} onChange={e => setForm(p => ({ ...p, status: e.target.value }))}>
                 {STATUSES.map(s => <option key={s} value={s}>{s.replace('_',' ')}</option>)}
               </Select>
-              <Input label="Check In"  type="time" value={form.check_in}  onChange={e => setForm(p => ({ ...p, check_in: e.target.value }))} />
-              <Input label="Check Out" type="time" value={form.check_out} onChange={e => setForm(p => ({ ...p, check_out: e.target.value }))} />
+              <Input label="Check In *"          type="time" value={form.check_in}  onChange={e => setForm(p => ({ ...p, check_in: e.target.value }))} />
+              <Input label="Check Out (optional)" type="time" value={form.check_out} onChange={e => setForm(p => ({ ...p, check_out: e.target.value }))} />
             </div>
-            <Select label="Method" value={form.method} onChange={e => setForm(p => ({ ...p, method: e.target.value }))}>
-              {METHODS.map(m => <option key={m} value={m}>{m}</option>)}
-            </Select>
+            {/*<Select label="Method" value={form.method} onChange={e => setForm(p => ({ ...p, method: e.target.value }))}>*/}
+            {/*  {METHODS.map(m => <option key={m} value={m}>{m}</option>)}*/}
+            {/*</Select>*/}
+            {!form.check_out && (
+                <div style={{ padding: '10px 14px', backgroundColor: '#78350f22', border: '1px solid #92400e', borderRadius: 10, fontSize: 12, color: '#fcd34d', lineHeight: 1.6, display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                  <span>💡</span>
+                  <span>
+                    <strong>Open shift</strong> — Leave check-out blank if you just want to record the clock-in.
+                    The employee can clock out themselves at the kiosk later, and the hours will be calculated automatically.
+                  </span>
+                </div>
+            )}
+
             <Input label="Notes" value={form.notes} onChange={e => setForm(p => ({ ...p, notes: e.target.value }))} placeholder="Optional notes" />
           </div>
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16, paddingTop: 14, borderTop: '1px solid #2a3a52' }}>
@@ -198,6 +222,13 @@ export default function AttendancePage() {
             <Button variant="primary" onClick={submit} loading={saving}>Save Record</Button>
           </div>
         </Modal>
+
+        <style>{`
+          @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50%      { opacity: 0.4; }
+          }
+        `}</style>
       </div>
   );
 }
