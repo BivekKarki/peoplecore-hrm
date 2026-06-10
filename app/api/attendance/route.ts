@@ -1,121 +1,88 @@
-import { NextRequest } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { getSession, requireAuth } from '@/lib/auth';
+import { AttendanceRecord } from '@/types';
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-
+// GET /api/attendance?date=YYYY-MM-DD&employee_id=...
 export async function GET(req: NextRequest) {
-    const cookie = req.cookies.get('pc_session')?.value;
-    if (!cookie) {
-        return new Response('Unauthorized', { status: 401 });
+    const user = await getSession();
+    const authError = requireAuth(user);
+    if (authError) return authError;
+
+    const { searchParams } = new URL(req.url);
+    const date = searchParams.get('date') ?? new Date().toISOString().split('T')[0];
+    const employee_id = searchParams.get('employee_id');
+
+    try {
+        const conditions = ['a.date = $1'];
+        const params: unknown[] = [date];
+        let idx = 2;
+
+        if (employee_id) {
+            conditions.push(`a.employee_id = $${idx++}`);
+            params.push(employee_id);
+        }
+
+        const res = await query<AttendanceRecord>(
+            `SELECT a.*,
+              e.first_name || ' ' || e.last_name AS employee_name,
+              e.department
+       FROM attendance a
+       JOIN employees e ON e.id = a.employee_id
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY a.check_in ASC NULLS LAST`,
+            params
+        );
+
+        return NextResponse.json({ data: res.rows });
+    } catch (err) {
+        console.error('[Attendance GET]', err);
+        return NextResponse.json({ error: 'Failed to fetch attendance' }, { status: 500 });
     }
+}
 
-    const encoder = new TextEncoder();
+// POST /api/attendance
+export async function POST(req: NextRequest) {
+    const user = await getSession();
+    const authError = requireAuth(user);
+    if (authError) return authError;
 
-    const stream = new ReadableStream({
-        async start(controller) {
-            const send = (event: string, data: unknown) => {
-                try {
-                    controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
-                } catch { /* client disconnected */ }
-            };
+    try {
+        const body = await req.json();
+        const { employee_id, date, check_in, check_out, status, method, notes } = body;
 
-            const fetchAndSend = async () => {
-                try {
-                    const [attRes, recentRes, activeRes] = await Promise.all([
-                        // 1. Stats
-                        query<{
-                            present: number; absent: number; late: number;
-                            wfh: number; on_leave: number; total_active: number;
-                        }>(`
-              SELECT
-                COUNT(*) FILTER (WHERE a.status='present')::int          AS present,
-                COUNT(*) FILTER (WHERE a.status='absent')::int           AS absent,
-                COUNT(*) FILTER (WHERE a.status='late')::int             AS late,
-                COUNT(*) FILTER (WHERE a.status='work_from_home')::int   AS wfh,
-                (SELECT COUNT(*)::int FROM employees WHERE status='on_leave') AS on_leave,
-                (SELECT COUNT(*)::int FROM employees WHERE status='active')   AS total_active
-              FROM attendance a
-              WHERE a.date = CURRENT_DATE
-            `),
+        if (!employee_id) return NextResponse.json({ error: 'Employee ID required' }, { status: 400 });
+        if (!date)        return NextResponse.json({ error: 'Date required' }, { status: 400 });
+        if (!status)      return NextResponse.json({ error: 'Status required' }, { status: 400 });
 
-                        // 2. Recent check-ins (last 5 minutes — for the pulse animations)
-                        query<{
-                            employee_name: string; check_in: string; avatar_color: string;
-                        }>(`
-              SELECT
-                e.first_name || ' ' || e.last_name AS employee_name,
-                ws.check_in,
-                e.avatar_color
-              FROM work_sessions ws
-              JOIN employees e ON e.id = ws.employee_id
-              WHERE ws.session_date = CURRENT_DATE
-                AND ws.check_in >= NOW() - INTERVAL '5 minutes'
-              ORDER BY ws.check_in DESC
-              LIMIT 5
-            `),
+        // Combine date + time into full timestamps
+        // Form sends "09:00", DB needs "2026-06-10T09:00:00"
+        const checkInISO  = check_in  ? `${date}T${check_in.length === 5  ? check_in  + ':00' : check_in}`  : null;
+        const checkOutISO = check_out ? `${date}T${check_out.length === 5 ? check_out + ':00' : check_out}` : null;
 
-                        // 3. ALL currently-active employees (clocked in today, no checkout yet)
-                        query<{
-                            employee_id: string;
-                            employee_name: string;
-                            department: string;
-                            job_title: string;
-                            avatar_color: string;
-                            check_in: string;
-                            method: string;
-                            minutes_active: number;
-                        }>(`
-              SELECT
-                e.id   AS employee_id,
-                e.first_name || ' ' || e.last_name AS employee_name,
-                e.department,
-                e.job_title,
-                e.avatar_color,
-                ws.check_in,
-                COALESCE(ws.check_in_method, 'kiosk') AS method,
-                EXTRACT(EPOCH FROM (NOW() - ws.check_in))::int / 60 AS minutes_active
-              FROM work_sessions ws
-              JOIN employees e ON e.id = ws.employee_id
-              WHERE ws.session_date = CURRENT_DATE
-                AND ws.check_out IS NULL
-              ORDER BY ws.check_in ASC
-            `),
-                    ]);
+        let hoursWorked: number | null = null;
+        if (checkInISO && checkOutISO) {
+            const diff = new Date(checkOutISO).getTime() - new Date(checkInISO).getTime();
+            hoursWorked = Math.round((diff / 1000 / 60 / 60) * 100) / 100;
+        }
 
-                    send('attendance', {
-                        stats:           attRes.rows[0] ?? {},
-                        recent_checkins: recentRes.rows,
-                        currently_active: activeRes.rows,
-                        timestamp:       new Date().toISOString(),
-                    });
-                } catch (err) {
-                    console.error('[SSE Error]', err);
-                    send('error', { message: 'Data fetch failed' });
-                }
-            };
+        const res = await query<AttendanceRecord>(
+            `INSERT INTO attendance (employee_id, date, check_in, check_out, hours_worked, status, method, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (employee_id, date) DO UPDATE
+         SET check_in     = EXCLUDED.check_in,
+             check_out    = EXCLUDED.check_out,
+             hours_worked = EXCLUDED.hours_worked,
+             status       = EXCLUDED.status,
+             method       = EXCLUDED.method,
+             notes        = EXCLUDED.notes
+       RETURNING *`,
+            [employee_id, date, checkInISO, checkOutISO, hoursWorked, status, method || 'manual', notes || null]
+        );
 
-            await fetchAndSend();
-            const interval  = setInterval(fetchAndSend, 10000);
-            const heartbeat = setInterval(() => {
-                try { controller.enqueue(encoder.encode(': heartbeat\n\n')); }
-                catch { clearInterval(interval); clearInterval(heartbeat); }
-            }, 30000);
-
-            req.signal.addEventListener('abort', () => {
-                clearInterval(interval);
-                clearInterval(heartbeat);
-                try { controller.close(); } catch { /* already closed */ }
-            });
-        },
-    });
-
-    return new Response(stream, {
-        headers: {
-            'Content-Type':  'text/event-stream',
-            'Cache-Control': 'no-cache, no-transform',
-            'Connection':    'keep-alive',
-            'X-Accel-Buffering': 'no',
-        },
-    });
+        return NextResponse.json({ data: res.rows[0] }, { status: 201 });
+    } catch (err) {
+        console.error('[Attendance POST]', err);
+        return NextResponse.json({ error: 'Failed to save attendance' }, { status: 500 });
+    }
 }

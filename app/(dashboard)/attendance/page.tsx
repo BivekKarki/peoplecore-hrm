@@ -13,30 +13,51 @@ interface AttendanceRecord {
   employee_name: string; department: string;
 }
 
-const STATUSES = ['present','absent','late','half_day','work_from_home'];
-// const METHODS  = ['manual','kiosk','facial'];
+const STATUSES = ['present', 'absent', 'late', 'half_day', 'work_from_home'];
 
 export default function AttendancePage() {
-  const [records, setRecords]   = useState<AttendanceRecord[]>([]);
-  const [loading, setLoading]   = useState(true);
-  const [date, setDate]         = useState(new Date().toISOString().split('T')[0]);
-  const [modal, setModal]       = useState(false);
-  const [saving, setSaving]     = useState(false);
-  const [employees, setEmps]    = useState<{ id: string; first_name: string; last_name: string; department: string }[]>([]);
-  const [form, setForm]         = useState({
-    employee_id: '', date: new Date().toISOString().split('T')[0],
-    check_in: '09:00', check_out: '',
-    status: 'present', notes: '',
+  const [records, setRecords] = useState<AttendanceRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [date, setDate]       = useState(new Date().toISOString().split('T')[0]);
+  const [modal, setModal]     = useState(false);
+  const [saving, setSaving]   = useState(false);
+  const [employees, setEmps]  = useState<{ id: string; first_name: string; last_name: string; department: string }[]>([]);
+  const [form, setForm]       = useState({
+    employee_id: '',
+    date:        new Date().toISOString().split('T')[0],
+    check_in:    '09:00',
+    check_out:   '',
+    status:      'present',
+    notes:       '',
   });
 
+  // ── Load attendance for the selected date (with timeout safety) ─────────────
   const load = useCallback(async () => {
     setLoading(true);
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 10000);
     try {
-      const r = await fetch(`/api/attendance?date=${date}`);
+      const r = await fetch(`/api/attendance?date=${date}`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (!r.ok) {
+        console.error('Attendance fetch failed:', r.status);
+        showToast(`Server error: ${r.status}`, 'error');
+        setRecords([]);
+        return;
+      }
       const j = await r.json();
       setRecords(j.data ?? []);
-    } catch { showToast('Failed to load attendance', 'error'); }
-    finally { setLoading(false); }
+    } catch (err) {
+      clearTimeout(timeoutId);
+      console.error('Attendance load error:', err);
+      const msg = err instanceof Error && err.name === 'AbortError'
+          ? 'Server is slow or down — request timed out'
+          : 'Failed to load attendance — check console';
+      showToast(msg, 'error');
+      setRecords([]);
+    } finally {
+      setLoading(false);
+    }
   }, [date]);
 
   useEffect(() => { load(); }, [load]);
@@ -44,35 +65,43 @@ export default function AttendancePage() {
   useEffect(() => {
     fetch('/api/employees?limit=200')
         .then(r => r.json())
-        .then(j => setEmps(j.data ?? []));
+        .then(j => setEmps(j.data ?? []))
+        .catch(err => console.error('Employees load error:', err));
   }, []);
 
+  // ── Submit a manual attendance record ───────────────────────────────────────
   const submit = async () => {
     if (!form.employee_id) { showToast('Select an employee', 'error'); return; }
     if (!form.date)        { showToast('Select a date', 'error'); return; }
+    if (!form.check_in)    { showToast('Check-in time is required', 'error'); return; }
     setSaving(true);
     try {
       const r = await fetch('/api/attendance', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ ...form, method: 'manual' }),
       });
       const j = await r.json();
-      if (!r.ok) throw new Error(j.error);
-      showToast('Attendance recorded', 'success');
+      if (!r.ok) throw new Error(j.error || 'Failed');
+      showToast(form.check_out ? 'Attendance recorded' : 'Open shift recorded — employee can clock out later', 'success');
       setModal(false);
       setForm({ employee_id: '', date, check_in: '09:00', check_out: '', status: 'present', notes: '' });
-      await load();
+      load();
     } catch (e: unknown) {
       showToast(e instanceof Error ? e.message : 'Failed', 'error');
-    } finally { setSaving(false); }
+    } finally {
+      setSaving(false);
+    }
   };
 
+  // ── Derived stats ───────────────────────────────────────────────────────────
   const present = records.filter(r => r.status === 'present').length;
   const absent  = records.filter(r => r.status === 'absent').length;
   const late    = records.filter(r => r.status === 'late').length;
   const wfh     = records.filter(r => r.status === 'work_from_home').length;
   const rate    = records.length > 0 ? Math.round(((present + late + wfh) / records.length) * 100) : 0;
 
+  // ── Helpers ─────────────────────────────────────────────────────────────────
   const fmtTime = (t: string | null) => {
     if (!t) return '—';
     try { return new Date(t).toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' }); }
@@ -81,13 +110,23 @@ export default function AttendancePage() {
 
   const statusIcon = (s: string) => {
     switch (s) {
-      case 'present':        return <CheckCircle size={14} style={{ color: '#4ade80' }} />;
-      case 'absent':         return <XCircle size={14} style={{ color: '#f87171' }} />;
-      case 'late':           return <AlertTriangle size={14} style={{ color: '#fbbf24' }} />;
+      case 'present':        return <CheckCircle    size={14} style={{ color: '#4ade80' }} />;
+      case 'absent':         return <XCircle        size={14} style={{ color: '#f87171' }} />;
+      case 'late':           return <AlertTriangle  size={14} style={{ color: '#fbbf24' }} />;
       case 'work_from_home': return <span style={{ fontSize: 14 }}>🏠</span>;
       case 'half_day':       return <span style={{ fontSize: 14 }}>½</span>;
       default:               return null;
     }
+  };
+
+  const methodTag = (m: string) => {
+    const map: Record<string, { icon: string; label: string; color: string }> = {
+      kiosk:  { icon: '📷', label: 'Kiosk',  color: '#4ade80' },
+      facial: { icon: '👤', label: 'Facial', color: '#60a5fa' },
+      manual: { icon: '✋', label: 'Manual', color: '#94a3b8' },
+    };
+    const meta = map[m] ?? { icon: '?', label: m, color: '#94a3b8' };
+    return <span title={meta.label} style={{ color: meta.color }}>{meta.icon} {meta.label}</span>;
   };
 
   const prevDay = () => { const d = new Date(date); d.setDate(d.getDate() - 1); setDate(d.toISOString().split('T')[0]); };
@@ -104,6 +143,7 @@ export default function AttendancePage() {
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '16px 24px' }}>
 
+          {/* Stats */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 12, marginBottom: 20 }}>
             <StatCard label="Present" value={present} color="#16a34a" icon={<CheckCircle size={16}/>} />
             <StatCard label="Absent"  value={absent}  color="#dc2626" icon={<XCircle size={16}/>} />
@@ -112,7 +152,8 @@ export default function AttendancePage() {
             <StatCard label="Rate"    value={`${rate}%`} color={rate >= 85 ? '#16a34a' : rate >= 70 ? '#d97706' : '#dc2626'} delta="attendance" />
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+          {/* Date navigator */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
             <button onClick={prevDay} style={{ padding: '8px 12px', backgroundColor: '#1e2d42', border: '1px solid #2a3a52', borderRadius: 8, color: '#94a3b8', cursor: 'pointer', fontSize: 16 }}>‹</button>
             <input type="date" value={date} onChange={e => setDate(e.target.value)}
                    style={{ backgroundColor: '#1e2d42', border: '1px solid #2a3a52', borderRadius: 8, color: '#f1f5f9', padding: '8px 12px', fontSize: 13, outline: 'none', fontFamily: 'monospace' }} />
@@ -127,6 +168,7 @@ export default function AttendancePage() {
             <div style={{ marginLeft: 'auto', fontSize: 12, color: '#64748b', fontFamily: 'monospace' }}>{records.length} records</div>
           </div>
 
+          {/* Table */}
           <Card>
             {loading ? (
                 <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}><Spinner size={28} /></div>
@@ -137,7 +179,7 @@ export default function AttendancePage() {
                   <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                     <thead>
                     <tr style={{ borderBottom: '1px solid #2a3a52' }}>
-                      {['Employee','Department','Status','Check In','Check Out','Hours','Method','Notes'].map(h => (
+                      {['Employee', 'Department', 'Status', 'Check In', 'Check Out', 'Hours', 'Method', 'Notes'].map(h => (
                           <th key={h} style={{ textAlign: 'left', padding: '12px 16px', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#64748b', fontFamily: 'monospace', fontWeight: 'normal' }}>{h}</th>
                       ))}
                     </tr>
@@ -155,7 +197,7 @@ export default function AttendancePage() {
                       return (
                           <tr key={rec.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
                             <td style={{ padding: '11px 16px', fontSize: 13, fontWeight: 500, color: '#e2e8f0' }}>{rec.employee_name}</td>
-                            <td style={{ padding: '11px 16px', fontSize: 12, color: '#64748b' }}>{rec.department}</td>
+                            <td style={{ padding: '11px 16px', fontSize: 12, color: '#64748b' }}>{rec.department ?? '—'}</td>
                             <td style={{ padding: '11px 16px' }}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                                 {statusIcon(rec.status)}
@@ -166,17 +208,17 @@ export default function AttendancePage() {
                             <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', color: rec.check_out ? '#f87171' : '#475569' }}>
                               {rec.check_out ? fmtTime(rec.check_out) : '⏳ pending'}
                             </td>
-                            <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', color: '#e2e8f0', fontWeight: 600 }}>{hours}</td>
                             <td style={{ padding: '11px 16px', fontSize: 12, fontFamily: 'monospace', fontWeight: 600 }}>
                               {openShift ? (
                                   <span style={{ color: '#fbbf24', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                                      <span style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: '#fbbf24', animation: 'pulse 2s ease-in-out infinite' }} />
-                                      Open
-                                    </span>
+                              <span style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: '#fbbf24', animation: 'pulse 2s ease-in-out infinite' }} />
+                              Open
+                            </span>
                               ) : (
                                   <span style={{ color: '#e2e8f0' }}>{hours}</span>
                               )}
                             </td>
+                            <td style={{ padding: '11px 16px', fontSize: 11 }}>{methodTag(rec.method)}</td>
                             <td style={{ padding: '11px 16px', fontSize: 12, color: '#64748b' }}>{rec.notes ?? '—'}</td>
                           </tr>
                       );
@@ -188,6 +230,7 @@ export default function AttendancePage() {
           </Card>
         </div>
 
+        {/* Add Record Modal */}
         <Modal open={modal} onClose={() => setModal(false)} title="Add Attendance Record" maxWidth="max-w-lg">
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <Select label="Employee *" value={form.employee_id} onChange={e => setForm(p => ({ ...p, employee_id: e.target.value }))}>
@@ -195,23 +238,21 @@ export default function AttendancePage() {
               {employees.map(e => <option key={e.id} value={e.id}>{e.first_name} {e.last_name} — {e.department}</option>)}
             </Select>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              <Input label="Date *"   type="date" value={form.date}      onChange={e => setForm(p => ({ ...p, date: e.target.value }))} />
+              <Input label="Date *" type="date" value={form.date} onChange={e => setForm(p => ({ ...p, date: e.target.value }))} />
               <Select label="Status *" value={form.status} onChange={e => setForm(p => ({ ...p, status: e.target.value }))}>
-                {STATUSES.map(s => <option key={s} value={s}>{s.replace('_',' ')}</option>)}
+                {STATUSES.map(s => <option key={s} value={s}>{s.replace('_', ' ')}</option>)}
               </Select>
-              <Input label="Check In *"          type="time" value={form.check_in}  onChange={e => setForm(p => ({ ...p, check_in: e.target.value }))} />
+              <Input label="Check In *"           type="time" value={form.check_in}  onChange={e => setForm(p => ({ ...p, check_in: e.target.value }))} />
               <Input label="Check Out (optional)" type="time" value={form.check_out} onChange={e => setForm(p => ({ ...p, check_out: e.target.value }))} />
             </div>
-            {/*<Select label="Method" value={form.method} onChange={e => setForm(p => ({ ...p, method: e.target.value }))}>*/}
-            {/*  {METHODS.map(m => <option key={m} value={m}>{m}</option>)}*/}
-            {/*</Select>*/}
+
             {!form.check_out && (
                 <div style={{ padding: '10px 14px', backgroundColor: '#78350f22', border: '1px solid #92400e', borderRadius: 10, fontSize: 12, color: '#fcd34d', lineHeight: 1.6, display: 'flex', alignItems: 'flex-start', gap: 8 }}>
                   <span>💡</span>
                   <span>
-                    <strong>Open shift</strong> — Leave check-out blank if you just want to record the clock-in.
-                    The employee can clock out themselves at the kiosk later, and the hours will be calculated automatically.
-                  </span>
+                <strong>Open shift</strong> — Leave check-out blank if you just want to record the clock-in.
+                The employee can clock out themselves at the kiosk later, and the hours will be calculated automatically.
+              </span>
                 </div>
             )}
 
@@ -224,11 +265,11 @@ export default function AttendancePage() {
         </Modal>
 
         <style>{`
-          @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50%      { opacity: 0.4; }
-          }
-        `}</style>
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50%      { opacity: 0.4; }
+        }
+      `}</style>
       </div>
   );
 }
