@@ -1,17 +1,30 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import * as faceapi from '@vladmandic/face-api';
 import { Topbar } from '@/components/layout/Topbar';
 import { Card, Button, Spinner, showToast } from '@/components/ui';
 import {
   Camera, CheckCircle2, XCircle, Clock, LogIn, LogOut,
-  RefreshCw, ShieldCheck, User, Building, Mail, Briefcase,
+  RefreshCw, ShieldCheck, Mail, Briefcase, Building,
   AlertTriangle,
 } from 'lucide-react';
 
+// Type-only import — does NOT pull face-api into the bundle at module load
+import type * as FaceApiNS from '@vladmandic/face-api';
+type FaceApi = typeof FaceApiNS;
+
 type Mode = 'login' | 'verify';
-type Status = 'loading_models' | 'starting_camera' | 'ready' | 'scanning' | 'matched' | 'no_match' | 'processing' | 'done' | 'error';
+type Status =
+    | 'loading_models'
+    | 'starting_camera'
+    | 'ready'
+    | 'scanning'
+    | 'matched'
+    | 'no_match'
+    | 'processing'
+    | 'done'
+    | 'error'
+    | 'no_camera';
 
 interface MatchedEmployee {
   id: string;
@@ -23,7 +36,6 @@ interface MatchedEmployee {
   avatar_color: string;
   status: string;
   confidence: number;
-  // Active work session info (if any)
   active_session?: {
     id: string;
     check_in: string;
@@ -32,40 +44,66 @@ interface MatchedEmployee {
 }
 
 export default function FacialPage() {
-  const videoRef  = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
+  const videoRef        = useRef<HTMLVideoElement>(null);
+  const canvasRef       = useRef<HTMLCanvasElement>(null);
+  const streamRef       = useRef<MediaStream | null>(null);
   const scanIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const faceapiRef      = useRef<FaceApi | null>(null);
 
   const [mode, setMode]         = useState<Mode>('login');
   const [status, setStatus]     = useState<Status>('loading_models');
   const [statusMsg, setMsg]     = useState('Loading face recognition models…');
+  const [errorDetail, setErrorDetail] = useState<string>('');
   const [matched, setMatched]   = useState<MatchedEmployee | null>(null);
   const [autoScan, setAutoScan] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
 
-  // ── 1. Load face-api models ─────────────────────────────────────────────────
+  // ── 1. Boot sequence (client-only) ──────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
-    const loadModels = async () => {
+
+    const boot = async () => {
       try {
+        // ─── Step 1: dynamic import (browser only) ───
         setStatus('loading_models');
+        setMsg('Loading face recognition library…');
+        const faceapi = await import('@vladmandic/face-api');
+        if (cancelled) return;
+        faceapiRef.current = faceapi;
+
+        // ─── Step 2: load models ───
         setMsg('Loading face recognition models…');
         const MODEL_URL = '/models';
-        await Promise.all([
-          faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-          faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-          faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
-        ]);
+        try {
+          await Promise.all([
+            faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+            faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+            faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
+          ]);
+        } catch (err) {
+          if (cancelled) return;
+          console.error('Model load error:', err);
+          setStatus('error');
+          setMsg('Failed to load face recognition models');
+          setErrorDetail('Run "node scripts/download-models.js" to download the required model files into public/models/');
+          return;
+        }
+
         if (cancelled) return;
+
+        // ─── Step 3: start camera ───
         await startCamera();
       } catch (err) {
-        console.error('Model load error:', err);
+        if (cancelled) return;
+        console.error('Boot error:', err);
         setStatus('error');
-        setMsg('Failed to load face recognition models. Run: node scripts/download-models.js');
+        setMsg('Failed to initialize face recognition');
+        setErrorDetail(err instanceof Error ? err.message : 'Unknown initialization error');
       }
     };
-    loadModels();
+
+    boot();
+
     return () => {
       cancelled = true;
       stopCamera();
@@ -73,16 +111,21 @@ export default function FacialPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── 2. Camera control ───────────────────────────────────────────────────────
+  // ── 2. Camera control ──────────────────────────────────────────────────────
   const startCamera = async () => {
     setStatus('starting_camera');
     setMsg('Starting camera…');
+    setErrorDetail('');
+
+    // Guard: secure context required
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setStatus('error');
+      setMsg('Camera API not available');
+      setErrorDetail('Camera requires HTTPS or localhost. Open chrome://flags/#unsafely-treat-insecure-origin-as-secure and whitelist this URL, or run dev with HTTPS.');
+      return;
+    }
+
     try {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        setStatus('error');
-        setMsg('Camera requires HTTPS or localhost. Use https:// or enable chrome://flags/#unsafely-treat-insecure-origin-as-secure');
-        return;
-      }
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
         audio: false,
@@ -96,8 +139,30 @@ export default function FacialPage() {
       setMsg('Position face in frame');
     } catch (err) {
       console.error('Camera error:', err);
-      setStatus('error');
-      setMsg('Camera permission denied or unavailable.');
+      const errName = (err as Error)?.name ?? '';
+      const errMsg  = (err as Error)?.message ?? '';
+
+      if (errName === 'NotFoundError' || errName === 'DevicesNotFoundError') {
+        setStatus('no_camera');
+        setMsg('No camera detected on this device');
+        setErrorDetail('Connect a webcam, then click "Retry". On a desktop without a camera, use the mobile/tablet kiosk instead.');
+      } else if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError') {
+        setStatus('error');
+        setMsg('Camera permission denied');
+        setErrorDetail('Allow camera access in your browser settings, then click "Retry". In Chrome: click the camera icon in the address bar.');
+      } else if (errName === 'NotReadableError' || errName === 'TrackStartError') {
+        setStatus('error');
+        setMsg('Camera is in use by another application');
+        setErrorDetail('Close any other app using the camera (Zoom, Teams, etc.) and try again.');
+      } else if (errName === 'OverconstrainedError') {
+        setStatus('error');
+        setMsg('Camera does not meet requirements');
+        setErrorDetail('Your camera doesn\'t support the requested resolution. Try a different camera.');
+      } else {
+        setStatus('error');
+        setMsg('Could not access camera');
+        setErrorDetail(errMsg || 'Unknown camera error. Check browser console for details.');
+      }
     }
   };
 
@@ -112,35 +177,41 @@ export default function FacialPage() {
     }
   };
 
-  // ── 3. Capture frame & detect face ──────────────────────────────────────────
+  // ── 3. Detect face ─────────────────────────────────────────────────────────
   const detectFace = useCallback(async (): Promise<Float32Array | null> => {
-    if (!videoRef.current) return null;
-    const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 });
-    const detection = await faceapi
-        .detectSingleFace(videoRef.current, opts)
-        .withFaceLandmarks()
-        .withFaceDescriptor();
+    const faceapi = faceapiRef.current;
+    if (!faceapi || !videoRef.current) return null;
 
-    if (!detection) return null;
+    try {
+      const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 });
+      const detection = await faceapi
+          .detectSingleFace(videoRef.current, opts)
+          .withFaceLandmarks()
+          .withFaceDescriptor();
 
-    // Draw overlay for visual feedback
-    if (canvasRef.current && videoRef.current) {
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        canvas.width  = videoRef.current.videoWidth;
-        canvas.height = videoRef.current.videoHeight;
-        const box = detection.detection.box;
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.strokeStyle = '#4ade80';
-        ctx.lineWidth   = 3;
-        ctx.strokeRect(box.x, box.y, box.width, box.height);
+      if (!detection) return null;
+
+      if (canvasRef.current && videoRef.current) {
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          canvas.width  = videoRef.current.videoWidth;
+          canvas.height = videoRef.current.videoHeight;
+          const box = detection.detection.box;
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.strokeStyle = '#4ade80';
+          ctx.lineWidth   = 3;
+          ctx.strokeRect(box.x, box.y, box.width, box.height);
+        }
       }
+      return detection.descriptor;
+    } catch (err) {
+      console.error('Detection error:', err);
+      return null;
     }
-    return detection.descriptor;
   }, []);
 
-  // ── 4. Match against database ───────────────────────────────────────────────
+  // ── 4. Match against database ──────────────────────────────────────────────
   const matchFace = async (descriptor: Float32Array) => {
     setStatus('processing');
     setMsg('Identifying employee…');
@@ -154,7 +225,6 @@ export default function FacialPage() {
       if (j.matched && j.employee) {
         const emp = j.employee as MatchedEmployee;
 
-        // For Login mode, fetch the active work session (if any)
         if (mode === 'login') {
           try {
             const sRes = await fetch(`/api/sessions?employee_id=${emp.id}&date=today`);
@@ -164,23 +234,24 @@ export default function FacialPage() {
               const mins = Math.floor((Date.now() - new Date(active.check_in).getTime()) / 60000);
               emp.active_session = { id: active.id, check_in: active.check_in, minutes_elapsed: mins };
             }
-          } catch { /* ignore — show employee anyway */ }
+          } catch { /* show employee anyway */ }
         }
 
         setMatched(emp);
         setStatus('matched');
         setMsg(`Identified: ${emp.first_name} ${emp.last_name}`);
-        setAutoScan(false); // stop auto-scanning once matched
+        setAutoScan(false);
       } else {
         setMatched(null);
         setStatus('no_match');
-        setMsg('Face not recognised. Try again or check enrollment.');
+        setMsg('Face not recognised');
         setTimeout(() => { if (autoScan) setStatus('ready'); }, 3000);
       }
     } catch (err) {
       console.error('Match error:', err);
       setStatus('error');
-      setMsg('Identification failed. Check connection.');
+      setMsg('Identification request failed');
+      setErrorDetail(err instanceof Error ? err.message : 'Network or server error');
     }
   };
 
@@ -208,7 +279,7 @@ export default function FacialPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoScan, status, detectFace, mode]);
 
-  // ── 6. Actions: Clock In / Out / Reset ─────────────────────────────────────
+  // ── 6. Actions ─────────────────────────────────────────────────────────────
   const clockIn = async () => {
     if (!matched) return;
     setActionLoading(true);
@@ -256,9 +327,11 @@ export default function FacialPage() {
 
   const reset = () => {
     setMatched(null);
-    setStatus('ready');
-    setMsg('Position face in frame');
-    setAutoScan(true);
+    if (streamRef.current) {
+      setStatus('ready');
+      setMsg('Position face in frame');
+      setAutoScan(true);
+    }
     if (canvasRef.current) {
       const ctx = canvasRef.current.getContext('2d');
       ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
@@ -270,7 +343,12 @@ export default function FacialPage() {
     reset();
   };
 
-  // ── 7. Status styles ────────────────────────────────────────────────────────
+  const retryCamera = async () => {
+    setErrorDetail('');
+    await startCamera();
+  };
+
+  // ── 7. Render ──────────────────────────────────────────────────────────────
   const statusColor = {
     loading_models:  '#64748b',
     starting_camera: '#64748b',
@@ -281,7 +359,10 @@ export default function FacialPage() {
     processing:      '#a78bfa',
     done:            '#4ade80',
     error:           '#f87171',
+    no_camera:       '#fbbf24',
   }[status];
+
+  const cameraReady = status === 'ready' || status === 'scanning' || status === 'matched' || status === 'no_match' || status === 'processing' || status === 'done';
 
   return (
       <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
@@ -304,15 +385,9 @@ export default function FacialPage() {
               return (
                   <button key={t.id} onClick={() => switchMode(t.id as Mode)}
                           style={{
-                            flex: 1,
-                            padding: '10px 14px',
-                            borderRadius: 8,
-                            border: 'none',
-                            cursor: 'pointer',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            alignItems: 'center',
-                            gap: 4,
+                            flex: 1, padding: '10px 14px', borderRadius: 8,
+                            border: 'none', cursor: 'pointer',
+                            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4,
                             backgroundColor: active ? '#2563eb' : 'transparent',
                             color: active ? '#fff' : '#94a3b8',
                             transition: 'all .15s',
@@ -326,22 +401,23 @@ export default function FacialPage() {
             })}
           </div>
 
-          {/* Main layout */}
-          <div className="facial-grid" style={{
-            display: 'grid',
-            gridTemplateColumns: '1fr 380px',
-            gap: 16,
-          }}>
+          <div className="facial-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 380px', gap: 16 }}>
 
-            {/* ── Camera panel ─────────────────────────────────── */}
+            {/* Camera panel */}
             <Card style={{ padding: 16 }}>
               <div style={{ position: 'relative', width: '100%', aspectRatio: '16/10', backgroundColor: '#0f1724', borderRadius: 10, overflow: 'hidden' }}>
-                <video ref={videoRef} autoPlay muted playsInline
-                       style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
-                <canvas ref={canvasRef}
-                        style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', transform: 'scaleX(-1)', pointerEvents: 'none' }} />
 
-                {/* Scanning overlay */}
+                {/* Video / canvas — only render if camera is at least starting */}
+                {(cameraReady || status === 'starting_camera') && (
+                    <>
+                      <video ref={videoRef} autoPlay muted playsInline
+                             style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
+                      <canvas ref={canvasRef}
+                              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', transform: 'scaleX(-1)', pointerEvents: 'none' }} />
+                    </>
+                )}
+
+                {/* Scanning frame */}
                 {(status === 'ready' || status === 'scanning') && (
                     <>
                       <div style={{
@@ -360,7 +436,7 @@ export default function FacialPage() {
                 {/* Loading overlay */}
                 {(status === 'loading_models' || status === 'starting_camera' || status === 'processing') && (
                     <div style={{
-                      position: 'absolute', inset: 0, backgroundColor: 'rgba(15,23,36,0.85)',
+                      position: 'absolute', inset: 0, backgroundColor: 'rgba(15,23,36,0.9)',
                       display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12,
                     }}>
                       <Spinner size={36} />
@@ -368,21 +444,53 @@ export default function FacialPage() {
                     </div>
                 )}
 
-                {/* Status badge */}
-                <div style={{
-                  position: 'absolute', top: 12, left: 12,
-                  display: 'flex', alignItems: 'center', gap: 6,
-                  padding: '6px 12px', borderRadius: 8,
-                  backgroundColor: 'rgba(15,23,36,0.85)',
-                  border: `1px solid ${statusColor}66`,
-                  color: statusColor,
-                  fontSize: 11, fontFamily: 'monospace',
-                }}>
-                  <span style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: statusColor, animation: status === 'scanning' || status === 'ready' ? 'pulse 1.5s ease-in-out infinite' : 'none' }} />
-                  {statusMsg}
-                </div>
+                {/* Error / No-camera overlay */}
+                {(status === 'error' || status === 'no_camera') && (
+                    <div style={{
+                      position: 'absolute', inset: 0,
+                      backgroundColor: 'rgba(15,23,36,0.95)',
+                      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                      padding: 24, textAlign: 'center',
+                    }}>
+                      {status === 'no_camera' ? (
+                          <Camera size={48} style={{ color: '#fbbf24', marginBottom: 12 }} />
+                      ) : (
+                          <AlertTriangle size={48} style={{ color: '#f87171', marginBottom: 12 }} />
+                      )}
+                      <div style={{ fontSize: 16, fontWeight: 600, color: status === 'no_camera' ? '#fcd34d' : '#fca5a5', marginBottom: 8 }}>
+                        {statusMsg}
+                      </div>
+                      {errorDetail && (
+                          <div style={{ fontSize: 12, color: '#94a3b8', lineHeight: 1.6, maxWidth: 480, marginBottom: 16 }}>
+                            {errorDetail}
+                          </div>
+                      )}
+                      <Button variant="primary" onClick={retryCamera}>
+                        <RefreshCw size={14} /> Retry
+                      </Button>
+                    </div>
+                )}
 
-                {/* Confidence badge */}
+                {/* Status badge */}
+                {cameraReady && (
+                    <div style={{
+                      position: 'absolute', top: 12, left: 12,
+                      display: 'flex', alignItems: 'center', gap: 6,
+                      padding: '6px 12px', borderRadius: 8,
+                      backgroundColor: 'rgba(15,23,36,0.85)',
+                      border: `1px solid ${statusColor}66`,
+                      color: statusColor,
+                      fontSize: 11, fontFamily: 'monospace',
+                    }}>
+                  <span style={{
+                    width: 6, height: 6, borderRadius: '50%',
+                    backgroundColor: statusColor,
+                    animation: status === 'scanning' || status === 'ready' ? 'pulse 1.5s ease-in-out infinite' : 'none',
+                  }} />
+                      {statusMsg}
+                    </div>
+                )}
+
                 {matched && (
                     <div style={{
                       position: 'absolute', top: 12, right: 12,
@@ -397,9 +505,9 @@ export default function FacialPage() {
                 )}
               </div>
 
-              {/* Manual capture button */}
-              <div style={{ marginTop: 12, display: 'flex', gap: 8, justifyContent: 'center' }}>
-                {status === 'ready' && (
+              {/* Capture button */}
+              {status === 'ready' && (
+                  <div style={{ marginTop: 12, display: 'flex', gap: 8, justifyContent: 'center' }}>
                     <Button variant="ghost" onClick={async () => {
                       setAutoScan(false);
                       const d = await detectFace();
@@ -408,28 +516,25 @@ export default function FacialPage() {
                     }}>
                       <Camera size={14} /> Capture Now
                     </Button>
-                )}
-              </div>
+                  </div>
+              )}
             </Card>
 
-            {/* ── Result panel ─────────────────────────────────── */}
+            {/* Result panel */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {/* Mode info card */}
               <Card style={{ padding: 14 }}>
                 <div style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
                   {mode === 'login' ? '🕐 Clock In / Out Mode' : '🛡 Identity Verification'}
                 </div>
                 <div style={{ fontSize: 12, color: '#94a3b8', lineHeight: 1.5 }}>
                   {mode === 'login'
-                      ? 'Use this as a backup when the kiosk is unavailable. Each clock-in/out is recorded as a work session with method "facial".'
-                      : 'Verify an employee\'s enrollment quality, or confirm someone\'s identity for security purposes. No attendance is recorded.'}
+                      ? 'Backup attendance when the kiosk is unavailable. Each clock-in/out is recorded with method "facial".'
+                      : 'Verify enrollment quality or confirm identity. No attendance is recorded.'}
                 </div>
               </Card>
 
-              {/* Result */}
               {status === 'matched' && matched ? (
                   <Card style={{ padding: 18 }}>
-                    {/* Employee header */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
                       <div style={{
                         width: 56, height: 56, borderRadius: '50%',
@@ -450,12 +555,11 @@ export default function FacialPage() {
                       <CheckCircle2 size={20} style={{ color: '#4ade80', flexShrink: 0 }} />
                     </div>
 
-                    {/* Profile details */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
                       {[
-                        { icon: Building, label: 'Department', value: matched.department },
-                        { icon: Mail,     label: 'Email',      value: matched.email },
-                        { icon: Briefcase,label: 'Status',     value: matched.status },
+                        { icon: Building,  label: 'Department', value: matched.department },
+                        { icon: Mail,      label: 'Email',      value: matched.email },
+                        { icon: Briefcase, label: 'Status',     value: matched.status },
                       ].map(d => (
                           <div key={d.label} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
                             <d.icon size={12} style={{ color: '#64748b', flexShrink: 0 }} />
@@ -465,7 +569,6 @@ export default function FacialPage() {
                       ))}
                     </div>
 
-                    {/* Mode A — Clock In/Out actions */}
                     {mode === 'login' && (
                         <>
                           {matched.active_session ? (
@@ -482,9 +585,7 @@ export default function FacialPage() {
                                 <div style={{ fontSize: 11, color: '#60a5fa', fontFamily: 'monospace', textTransform: 'uppercase', marginBottom: 4 }}>
                                   Ready to start
                                 </div>
-                                <div style={{ fontSize: 13, color: '#e2e8f0' }}>
-                                  No active shift today
-                                </div>
+                                <div style={{ fontSize: 13, color: '#e2e8f0' }}>No active shift today</div>
                               </div>
                           )}
 
@@ -503,7 +604,6 @@ export default function FacialPage() {
                         </>
                     )}
 
-                    {/* Mode B — Verification info */}
                     {mode === 'verify' && (
                         <>
                           <div style={{ padding: '12px 14px', backgroundColor: '#14532d22', border: '1px solid #166534', borderRadius: 10, marginBottom: 12 }}>
@@ -529,7 +629,7 @@ export default function FacialPage() {
                     <XCircle size={36} style={{ color: '#f87171', margin: '0 auto 8px' }} />
                     <div style={{ fontSize: 14, fontWeight: 600, color: '#fca5a5', marginBottom: 6 }}>Not Recognised</div>
                     <div style={{ fontSize: 12, color: '#94a3b8', lineHeight: 1.5, marginBottom: 12 }}>
-                      No matching employee found. This person may not be enrolled, or lighting/angle conditions are poor.
+                      No matching employee found. May not be enrolled, or lighting is poor.
                     </div>
                     <Button variant="ghost" onClick={reset} style={{ width: '100%' }}>
                       <RefreshCw size={13} /> Try Again
@@ -546,38 +646,45 @@ export default function FacialPage() {
                     </div>
                   </Card>
 
-              ) : status === 'error' ? (
-                  <Card style={{ padding: 18, textAlign: 'center' }}>
-                    <AlertTriangle size={36} style={{ color: '#fbbf24', margin: '0 auto 8px' }} />
-                    <div style={{ fontSize: 14, fontWeight: 600, color: '#fcd34d', marginBottom: 6 }}>Error</div>
-                    <div style={{ fontSize: 12, color: '#94a3b8', lineHeight: 1.5, marginBottom: 12 }}>{statusMsg}</div>
-                    <Button variant="ghost" onClick={() => window.location.reload()} style={{ width: '100%' }}>
-                      Reload Page
+              ) : (status === 'error' || status === 'no_camera') ? (
+                  <Card style={{ padding: 18 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                      {status === 'no_camera'
+                          ? <Camera size={18} style={{ color: '#fbbf24' }} />
+                          : <AlertTriangle size={18} style={{ color: '#f87171' }} />}
+                      <div style={{ fontSize: 13, fontWeight: 600, color: status === 'no_camera' ? '#fcd34d' : '#fca5a5' }}>
+                        {statusMsg}
+                      </div>
+                    </div>
+                    {errorDetail && (
+                        <div style={{ fontSize: 11, color: '#94a3b8', lineHeight: 1.6, marginBottom: 12 }}>
+                          {errorDetail}
+                        </div>
+                    )}
+                    <Button variant="primary" onClick={retryCamera} style={{ width: '100%' }}>
+                      <RefreshCw size={13} /> Retry
                     </Button>
                   </Card>
 
               ) : (
                   <Card style={{ padding: 24, textAlign: 'center' }}>
                     <Clock size={32} style={{ color: '#475569', margin: '0 auto 8px' }} />
-                    <div style={{ fontSize: 13, color: '#64748b' }}>
-                      Waiting for face…
-                    </div>
+                    <div style={{ fontSize: 13, color: '#64748b' }}>Waiting for face…</div>
                     <div style={{ fontSize: 11, color: '#334155', marginTop: 6 }}>
                       Look into the camera and stay still
                     </div>
                   </Card>
               )}
 
-              {/* Tips */}
               <Card style={{ padding: 12 }}>
                 <div style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace', textTransform: 'uppercase', marginBottom: 8 }}>
                   💡 Tips
                 </div>
                 <ul style={{ margin: 0, padding: '0 0 0 16px', fontSize: 11, color: '#94a3b8', lineHeight: 1.6 }}>
-                  <li>Face the camera directly with good lighting</li>
+                  <li>Face the camera with good lighting</li>
                   <li>Remove glasses if recognition fails</li>
                   <li>Stay within the dashed frame</li>
-                  <li>Stay still during capture</li>
+                  <li>Hold still during capture</li>
                 </ul>
               </Card>
             </div>
